@@ -19,7 +19,6 @@
  * 02110-1301, USA.
  */
 
-#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -33,12 +32,25 @@
 
 #define TIME_STRING_SIZE_MAX 24
 
+#ifndef timersub
+# define timersub(a, b, result)						      \
+  do {									      \
+    (result)->tv_sec = (a)->tv_sec - (b)->tv_sec;			      \
+    (result)->tv_usec = (a)->tv_usec - (b)->tv_usec;			      \
+    if ((result)->tv_usec < 0) {					      \
+      --(result)->tv_sec;						      \
+      (result)->tv_usec += 1000000;					      \
+    }									      \
+  } while (0)
+#endif	/* Misc.  */
+
 char *timestamp_current_time(void)
 {
     static char time_string[TIME_STRING_SIZE_MAX];
     static struct timeval tv, tv_now, tv_start, tv_previous;
     static bool first = true;
     struct tm *tm;
+    time_t tt;
     size_t len;
 
     // Get current time value
@@ -57,25 +69,29 @@ char *timestamp_current_time(void)
         case TIMESTAMP_24HOUR:
             // "hh:mm:ss.sss" (24 hour format)
             tv = tv_now;
-            tm = localtime(&tv.tv_sec);
+            tt = tv.tv_sec;
+            tm = localtime(&tt);
             len = strftime(time_string, sizeof(time_string), "%H:%M:%S", tm);
             break;
         case TIMESTAMP_24HOUR_START:
             // "hh:mm:ss.sss" (24 hour format relative to start time)
             timersub(&tv_now, &tv_start, &tv);
-            tm = gmtime(&tv.tv_sec);
+            tt = tv.tv_sec;
+            tm = gmtime(&tt);
             len = strftime(time_string, sizeof(time_string), "%H:%M:%S", tm);
             break;
         case TIMESTAMP_24HOUR_DELTA:
             // "hh:mm:ss.sss" (24 hour format relative to previous time stamp)
             timersub(&tv_now, &tv_previous, &tv);
-            tm = gmtime(&tv.tv_sec);
+            tt = tv.tv_sec;
+            tm = gmtime(&tt);
             len = strftime(time_string, sizeof(time_string), "%H:%M:%S", tm);
             break;
         case TIMESTAMP_ISO8601:
             // "YYYY-MM-DDThh:mm:ss.sss" (ISO-8601)
             tv = tv_now;
-            tm = localtime(&tv.tv_sec);
+            tt = tv.tv_sec;
+            tm = localtime(&tt);
             len = strftime(time_string, sizeof(time_string), "%Y-%m-%dT%H:%M:%S", tm);
             break;
         default:

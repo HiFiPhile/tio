@@ -19,7 +19,6 @@
  * 02110-1301, USA.
  */
 
-#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -33,9 +32,6 @@ static void signal_handler(int signum)
 {
     switch (signum)
     {
-        case SIGHUP:
-            tio_printf("Received SIGHUP signal!");
-            break;
         case SIGINT:
             tio_printf("Received SIGINT signal!");
             break;
@@ -45,7 +41,5 @@ static void signal_handler(int signum)
 
 void signal_handlers_install(void)
 {
-    signal(SIGHUP, signal_handler);
     signal(SIGINT, signal_handler);
-    signal(SIGPIPE, SIG_IGN);
 }

@@ -19,7 +19,6 @@
  * 02110-1301, USA.
  */
 
-#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -31,17 +30,13 @@
 #include <sys/stat.h>
 #include <sys/param.h>
 #include <sys/file.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <fcntl.h>
-#include <termios.h>
 #include <stdbool.h>
 #include <errno.h>
 #include <time.h>
 #include <dirent.h>
 #include <pthread.h>
-#include "config.h"
+#include "serialport.h"
 #include "configfile.h"
 #include "tty.h"
 #include "print.h"
@@ -49,38 +44,12 @@
 #include "misc.h"
 #include "log.h"
 #include "error.h"
-#include "socket.h"
 #include "setspeed.h"
-#include "rs485.h"
 #include "alert.h"
 #include "timestamp.h"
-#include "misc.h"
-
-/* tty device listing configuration */
-
-#if defined(__linux__)
-#define PATH_SERIAL_DEVICES "/dev/serial/by-id/"
-#define PREFIX_TTY_DEVICES ""
-#elif defined(__FreeBSD__)
-#define PATH_SERIAL_DEVICES "/dev/"
-#define PREFIX_TTY_DEVICES "cua"
-#elif defined(__APPLE__)
-#define PATH_SERIAL_DEVICES "/dev/"
-#define PREFIX_TTY_DEVICES "tty."
-#elif defined(__CYGWIN__)
-#define PATH_SERIAL_DEVICES "/dev/"
-#define PREFIX_TTY_DEVICES "ttyS"
-#elif defined(__HAIKU__)
-#define PATH_SERIAL_DEVICES "/dev/ports/"
-#define PREFIX_TTY_DEVICES ""
-#else
-#define PATH_SERIAL_DEVICES "/dev/"
-#define PREFIX_TTY_DEVICES "tty"
-#endif
-
-#ifndef CMSPAR
-#define CMSPAR   010000000000
-#endif
+#include "cpoll.h"
+#include "ring.h"
+#include "enumport.h"
 
 #define LINE_SIZE_MAX 1000
 
@@ -111,6 +80,9 @@
 #define KEY_Y 0x79
 #define KEY_Z 0x7a
 
+#define TIOCM_DTR 0x01
+#define TIOCM_RTS 0x02
+
 enum line_mode_t
 {
     LINE_OFF,
@@ -139,12 +111,13 @@ bool map_ign_cr = false;
 
 char key_hit = 0xff;
 
-static struct termios tio, tio_old, stdout_new, stdout_old, stdin_new, stdin_old;
+// static struct termios tio, tio_old, stdout_new, stdout_old, stdin_new, stdin_old;
 static unsigned long rx_total = 0, tx_total = 0;
-static bool connected = false;
-static bool standard_baudrate = true;
+static __LONG32 connected = false;
 static void (*print)(char c);
-static int fd;
+static struct sp_port *hPort;
+static struct sp_port_config* cfgPort, *cfgPort_old;
+static struct sp_event_set *sp_event = NULL;
 static bool map_i_ff_escc = false;
 static bool map_i_nl_crnl = false;
 static bool map_o_cr_nl = false;
@@ -158,7 +131,7 @@ static char tty_buffer[BUFSIZ*2];
 static size_t tty_buffer_count = 0;
 static char *tty_buffer_write_ptr = tty_buffer;
 static pthread_t thread;
-static int pipefd[2];
+static RING_Handle_t ring;
 static pthread_mutex_t mutex_input_ready = PTHREAD_MUTEX_INITIALIZER;
 static char line[LINE_SIZE_MAX];
 
@@ -200,13 +173,13 @@ inline static unsigned char char_to_nibble(char c)
     }
 }
 
-void tty_sync(int fd)
+void tty_sync()
 {
     ssize_t count;
 
     while (tty_buffer_count > 0)
     {
-        count = write(fd, tty_buffer, tty_buffer_count);
+        count = sp_blocking_write(hPort, tty_buffer, tty_buffer_count, 0);
         if (count < 0)
         {
             // Error
@@ -214,8 +187,7 @@ void tty_sync(int fd)
             break;
         }
         tty_buffer_count -= count;
-        fsync(fd);
-        tcdrain(fd);
+        sp_drain(hPort);
     }
 
     // Reset
@@ -223,7 +195,7 @@ void tty_sync(int fd)
     tty_buffer_count = 0;
 }
 
-ssize_t tty_write(int fd, const void *buffer, size_t count)
+ssize_t tty_write(const void *buffer, size_t count)
 {
     ssize_t retval = 0, bytes_written = 0;
     size_t i;
@@ -242,7 +214,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
         // Write byte by byte with output delay
         for (i=0; i<count; i++)
         {
-            retval = write(fd, buffer, 1);
+            retval = sp_blocking_write(hPort, buffer, 1, 0);
             if (retval < 0)
             {
                 // Error
@@ -256,8 +228,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
                 delay(option.output_line_delay);
             }
 
-            fsync(fd);
-            tcdrain(fd);
+            sp_drain(hPort);
 
             if (option.output_delay)
             {
@@ -270,7 +241,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
         // Force write of tty buffer if too full
         if ((tty_buffer_count + count) > BUFSIZ)
         {
-            tty_sync(fd);
+            tty_sync(hPort);
         }
 
         // Copy bytes to tty write buffer
@@ -288,14 +259,9 @@ void *tty_stdin_input_thread(void *arg)
     UNUSED(arg);
     char input_buffer[BUFSIZ];
     ssize_t byte_count;
-    ssize_t bytes_written;
 
-    // Create FIFO pipe
-    if (pipe(pipefd) == -1)
-    {
-        tio_error_printf("Failed to create pipe");
-        exit(EXIT_FAILURE);
-    }
+    // Create FIFO
+    ring = RING_Init(0x8000);
 
     // Signal that input pipe is ready
     pthread_mutex_unlock(&mutex_input_ready);
@@ -316,8 +282,6 @@ void *tty_stdin_input_thread(void *arg)
         }
         else if (byte_count == 0)
         {
-            // Close write end to signal EOF in read end
-            close(pipefd[1]);
             pthread_exit(0);
         }
 
@@ -354,7 +318,7 @@ void *tty_stdin_input_thread(void *arg)
                             break;
                         case KEY_SHIFT_F:
                             tio_printf("Flushed data I/O channels")
-                            tcflush(fd, TCIOFLUSH);
+                            sp_drain(hPort);
                             break;
                         default:
                             break;
@@ -365,16 +329,7 @@ void *tty_stdin_input_thread(void *arg)
         }
 
         // Write all bytes read to pipe
-        while (byte_count > 0)
-        {
-            bytes_written = write(pipefd[1], input_buffer, byte_count);
-            if (bytes_written < 0)
-            {
-                tio_warning_printf("Could not write to pipe (%s)", strerror(errno));
-                break;
-            }
-            byte_count -= bytes_written;
-        }
+        RING_Write_Blocking(ring, input_buffer, byte_count);
     }
 
     pthread_exit(0);
@@ -412,7 +367,7 @@ static void output_hex(char c)
 
         optional_local_echo(hex_value);
 
-        ssize_t status = tty_write(fd, &hex_value, 1);
+        ssize_t status = tty_write(&hex_value, 1);
         if (status < 0)
         {
             tio_warning_printf("Could not write to tty device");
@@ -426,35 +381,25 @@ static void output_hex(char c)
 
 static void toggle_line(const char *line_name, int mask, enum line_mode_t line_mode)
 {
-    int state;
-
-    if (line_mode == LINE_TOGGLE)
-    {
-        // Toggle line
-        if (ioctl(fd, TIOCMGET, &state) < 0)
-        {
-            tio_warning_printf("Could not get line state (%s)", strerror(errno));
-        }
-        else
-        {
-            if (state & mask)
-            {
-                state &= ~mask;
-                tio_printf("Setting %s to HIGH", line_name);
-            }
-            else
-            {
-                state |= mask;
-                tio_printf("Setting %s to LOW", line_name);
-            }
-            if (ioctl(fd, TIOCMSET, &state) < 0)
-                tio_warning_printf("Could not set line state (%s)", strerror(errno));
-        }
-    } else if (line_mode == LINE_PULSE)
+    // Toggle line
+    struct sp_port_config* config;
+    sp_new_config(&config);
+    sp_get_config(hPort, config);
+    enum sp_dtr dtr;
+    enum sp_rts rts;
+    sp_get_config_dtr(config, &dtr);
+    sp_get_config_rts(config, &rts);
+    if(mask & TIOCM_DTR) {
+        sp_set_config_dtr(config, dtr == SP_DTR_OFF ? SP_DTR_ON : SP_DTR_OFF);
+        tio_printf("Setting %s to %s", line_name, dtr == SP_DTR_OFF ? "LOW" : "HIGH");
+    } if(mask & TIOCM_RTS) {
+        sp_set_config_rts(config, rts == SP_RTS_OFF ? SP_RTS_ON : SP_RTS_OFF);
+        tio_printf("Setting %s to %s", line_name, rts == SP_RTS_OFF ? "LOW" : "HIGH");
+    }
+    sp_set_config(hPort, config);
+    if (line_mode == LINE_PULSE)
     {
         int duration = 0;
-        // Pulse line
-        toggle_line(line_name, mask, LINE_TOGGLE);
         switch (mask)
         {
             case TIOCM_DTR:
@@ -463,20 +408,8 @@ static void toggle_line(const char *line_name, int mask, enum line_mode_t line_m
             case TIOCM_RTS:
                 duration = option.rts_pulse_duration;
                 break;
-            case TIOCM_CTS:
-                duration = option.cts_pulse_duration;
-                break;
-            case TIOCM_DSR:
-                duration = option.dsr_pulse_duration;
-                break;
-            case TIOCM_CD:
-                duration = option.dcd_pulse_duration;
-                break;
-            case TIOCM_RI:
-                duration = option.ri_pulse_duration;
-                break;
             default:
-                duration = 0;
+                duration = option.pulse_duration;
                 break;
         }
         if (duration > 0)
@@ -484,8 +417,16 @@ static void toggle_line(const char *line_name, int mask, enum line_mode_t line_m
             tio_printf("Waiting %d ms", duration);
             delay(duration);
         }
-        toggle_line(line_name, mask, LINE_TOGGLE);
+        if(mask & TIOCM_DTR) {
+            sp_set_config_dtr(config, dtr);
+            tio_printf("Setting %s to %s", line_name, dtr == SP_DTR_OFF ? "HIGH" : "LOW");
+        } if(mask & TIOCM_RTS) {
+            sp_set_config_rts(config, rts);
+            tio_printf("Setting %s to %s", line_name, rts == SP_RTS_OFF ? "HIGH" : "LOW");
+        }
+        sp_set_config(hPort, config);
     }
+    sp_free_config(config);
 }
 
 static int tio_readln(void)
@@ -495,7 +436,7 @@ static int tio_readln(void)
     /* Read line, accept BS and DEL as rubout characters */
     for (p = line ; p < &line[LINE_SIZE_MAX-1]; )
     {
-        if (read(pipefd[0], p, 1) > 0)
+        if (RING_Read_Blocking(ring, p, 1) == 0)
         {
             if (*p == 0x08 || *p == 0x7f)
             {
@@ -519,7 +460,6 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 {
     char unused_char;
     bool unused_bool;
-    int state;
     static enum line_mode_t line_mode = LINE_OFF;
     static char previous_char = 0;
 
@@ -547,16 +487,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 toggle_line("RTS", TIOCM_RTS, line_mode);
                 break;
             case KEY_2:
-                toggle_line("CTS", TIOCM_CTS, line_mode);
-                break;
-            case KEY_3:
-                toggle_line("DSR", TIOCM_DSR, line_mode);
-                break;
-            case KEY_4:
-                toggle_line("DCD", TIOCM_CD, line_mode);
-                break;
-            case KEY_5:
-                toggle_line("RI", TIOCM_RI, line_mode);
+                toggle_line("DTR+RTS", TIOCM_DTR + TIOCM_RTS, line_mode);
                 break;
             default:
                 tio_warning_printf("Invalid line number");
@@ -611,20 +542,35 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_SHIFT_L:
-                if (ioctl(fd, TIOCMGET, &state) < 0)
+            {
+                enum sp_signal signal;
+                if (sp_get_signals(hPort, &signal) < 0)
                 {
                     tio_warning_printf("Could not get line state (%s)", strerror(errno));
                     break;
                 }
-                tio_printf("Line states:");
-                tio_printf(" DTR: %s", (state & TIOCM_DTR) ? "LOW" : "HIGH");
-                tio_printf(" RTS: %s", (state & TIOCM_RTS) ? "LOW" : "HIGH");
-                tio_printf(" CTS: %s", (state & TIOCM_CTS) ? "LOW" : "HIGH");
-                tio_printf(" DSR: %s", (state & TIOCM_DSR) ? "LOW" : "HIGH");
-                tio_printf(" DCD: %s", (state & TIOCM_CD) ? "LOW" : "HIGH");
-                tio_printf(" RI : %s", (state & TIOCM_RI) ? "LOW" : "HIGH");
-                break;
+                struct sp_port_config* config;
+                sp_new_config(&config);
+                sp_get_config(hPort, config);
+                enum sp_dtr dtr;
+                enum sp_rts rts;
+                enum sp_cts cts;
+                enum sp_dsr dsr;
+                sp_get_config_dtr(config,&dtr);
+                sp_get_config_rts(config,&rts);
+                sp_get_config_cts(config,&cts);
+                sp_get_config_dsr(config,&dsr);
+                sp_free_config(config);
 
+                tio_printf("Line states:");
+                tio_printf(" DTR: %s", (dtr == SP_DTR_OFF) ? "HIGH" : "LOW");
+                tio_printf(" RTS: %s", (rts == SP_RTS_OFF) ? "HIGH" : "LOW");
+                tio_printf(" CTS: %s", (signal & SP_SIG_CTS) ? "LOW" : "HIGH");
+                tio_printf(" DSR: %s", (signal & SP_SIG_DSR) ? "LOW" : "HIGH");
+                tio_printf(" DCD: %s", (signal & SP_SIG_DCD) ? "LOW" : "HIGH");
+                tio_printf(" RI : %s", (signal & SP_SIG_RI) ? "LOW" : "HIGH");
+                break;
+            }
             case KEY_F:
                 if (option.log)
                 {
@@ -646,40 +592,32 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 
             case KEY_G:
                 tio_printf("Please enter which serial line number to toggle:");
-                tio_printf(" DTR (0)");
-                tio_printf(" RTS (1)");
-                tio_printf(" CTS (2)");
-                tio_printf(" DSR (3)");
-                tio_printf(" DCD (4)");
-                tio_printf(" RI  (5)");
+                tio_printf(" DTR        (0)");
+                tio_printf(" RTS        (1)");
+                tio_printf(" DTR+RTS    (2)");
                 // Process next input character as part of the line toggle step
                 line_mode = LINE_TOGGLE;
                 break;
 
             case KEY_P:
                 tio_printf("Please enter which serial line number to pulse:");
-                tio_printf(" DTR (0)");
-                tio_printf(" RTS (1)");
-                tio_printf(" CTS (2)");
-                tio_printf(" DSR (3)");
-                tio_printf(" DCD (4)");
-                tio_printf(" RI  (5)");
+                tio_printf(" DTR        (0)");
+                tio_printf(" RTS        (1)");
+                tio_printf(" DTR+RTS    (2)");
                 // Process next input character as part of the line pulse step
                 line_mode = LINE_PULSE;
                 break;
 
             case KEY_B:
-                tcsendbreak(fd, 0);
+                sp_start_break(hPort);
+                delay(100);
+                sp_end_break(hPort);
                 break;
 
             case KEY_C:
                 tio_printf("Configuration:");
                 options_print();
                 config_file_print();
-                if (option.rs485)
-                {
-                    rs485_print_config();
-                }
                 break;
 
             case KEY_E:
@@ -773,7 +711,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 if (tio_readln()) {
                     tio_printf("Sending file '%s'  ", line);
                     tio_printf("Press any key to abort transfer");
-                    tio_printf("%s", xymodem_send(fd, line, input_char) < 0 ? "Aborted" : "Done");
+                    tio_printf("%s", xymodem_send(hPort, line, input_char) < 0 ? "Aborted" : "Done");
                 }
                 break;
 
@@ -792,85 +730,57 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 
 void stdin_restore(void)
 {
-    tcsetattr(STDIN_FILENO, TCSANOW, &stdin_old);
+    // tcsetattr(STDIN_FILENO, TCSANOW, &stdin_old);
 }
 
 void stdin_configure(void)
 {
-    int status;
+    // int status;
 
-    /* Save current stdin settings */
-    if (tcgetattr(STDIN_FILENO, &stdin_old) < 0)
-    {
-        tio_error_printf("Saving current stdin settings failed");
-        exit(EXIT_FAILURE);
-    }
+    // /* Save current stdin settings */
+    // if (tcgetattr(STDIN_FILENO, &stdin_old) < 0)
+    // {
+    //     tio_error_printf("Saving current stdin settings failed");
+    //     exit(EXIT_FAILURE);
+    // }
 
-    /* Prepare new stdin settings */
-    memcpy(&stdin_new, &stdin_old, sizeof(stdin_old));
+    // /* Prepare new stdin settings */
+    HANDLE hConsole = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(hConsole, &mode); //
 
-    /* Reconfigure stdin (RAW configuration) */
-    cfmakeraw(&stdin_new);
 
-    /* Control characters */
-    stdin_new.c_cc[VTIME] = 0; /* Inter-character timer unused */
-    stdin_new.c_cc[VMIN]  = 1; /* Blocking read until 1 character received */
+    // /* Reconfigure stdin (RAW configuration) */
+    mode &=~ENABLE_ECHO_INPUT;
+    mode &=~ENABLE_LINE_INPUT;
+    mode &=~ENABLE_PROCESSED_INPUT;
 
-    /* Activate new stdin settings */
-    status = tcsetattr(STDIN_FILENO, TCSANOW, &stdin_new);
-    if (status == -1)
-    {
-        tio_error_printf("Could not apply new stdin settings (%s)", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
+    // /* Control characters */
+    // stdin_new.c_cc[VTIME] = 0; /* Inter-character timer unused */
+    // stdin_new.c_cc[VMIN]  = 1; /* Blocking read until 1 character received */
 
-    /* Make sure we restore old stdin settings on exit */
-    atexit(&stdin_restore);
+    // /* Activate new stdin settings */
+    SetConsoleMode(hConsole, mode);
+
+    // /* Make sure we restore old stdin settings on exit */
+    // atexit(&stdin_restore);
 }
 
 void stdout_restore(void)
 {
-    tcsetattr(STDOUT_FILENO, TCSANOW, &stdout_old);
+    // tcsetattr(STDOUT_FILENO, TCSANOW, &stdout_old);
 }
 
 void stdout_configure(void)
 {
-    int status;
-
     /* Disable line buffering in stdout. This is necessary if we
      * want things like local echo to work correctly. */
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    /* Save current stdout settings */
-    if (tcgetattr(STDOUT_FILENO, &stdout_old) < 0)
-    {
-        tio_error_printf("Saving current stdio settings failed");
-        exit(EXIT_FAILURE);
-    }
-
-    /* Prepare new stdout settings */
-    memcpy(&stdout_new, &stdout_old, sizeof(stdout_old));
-
-    /* Reconfigure stdout (RAW configuration) */
-    cfmakeraw(&stdout_new);
-
-    /* Allow ^C / SIGINT (to allow termination when piping to tio) */
-    if (!interactive_mode)
-    {
-        stdout_new.c_lflag |= ISIG;
-    }
-
-    /* Control characters */
-    stdout_new.c_cc[VTIME] = 0; /* Inter-character timer unused */
-    stdout_new.c_cc[VMIN]  = 1; /* Blocking read until 1 character received */
-
-    /* Activate new stdout settings */
-    status = tcsetattr(STDOUT_FILENO, TCSANOW, &stdout_new);
-    if (status == -1)
-    {
-        tio_error_printf("Could not apply new stdout settings (%s)", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(hConsole, &mode); //
+    SetConsoleMode(hConsole, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
     /* At start use normal print function */
     print = print_normal;
@@ -881,95 +791,27 @@ void stdout_configure(void)
 
 void tty_configure(void)
 {
-    bool token_found = true;
-    char *token = NULL;
-    char *buffer;
-    int status;
-    speed_t baudrate;
-
-    memset(&tio, 0, sizeof(tio));
+    sp_new_config(&cfgPort);
+    sp_new_config(&cfgPort_old);
 
     /* Set speed */
-    switch (option.baudrate)
-    {
-        /* The macro below expands into switch cases autogenerated by meson
-         * configure. Each switch case verifies and configures the baud
-         * rate and is of the form:
-         *
-         * case $baudrate: baudrate = B$baudrate; break;
-         *
-         * Only switch cases for baud rates detected supported by the host
-         * system are inserted.
-         *
-         * To see which baud rates are being probed see meson.build
-         */
-        BAUDRATE_CASES
-
-        default:
-#if defined (HAVE_TERMIOS2) || defined (HAVE_IOSSIOSPEED)
-            standard_baudrate = false;
-            break;
-#else
-            tio_error_printf("Invalid baud rate");
-            exit(EXIT_FAILURE);
-#endif
-    }
-
-    if (standard_baudrate)
-    {
-        // Set input speed
-        status = cfsetispeed(&tio, baudrate);
-        if (status == -1)
-        {
-            tio_error_printf("Could not configure input speed (%s)", strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-
-        // Set output speed
-        status = cfsetospeed(&tio, baudrate);
-        if (status == -1)
-        {
-            tio_error_printf("Could not configure output speed (%s)", strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-    }
+    sp_set_config_baudrate(cfgPort, option.baudrate);
 
     /* Set databits */
-    tio.c_cflag &= ~CSIZE;
-    switch (option.databits)
-    {
-        case 5:
-            tio.c_cflag |= CS5;
-            break;
-        case 6:
-            tio.c_cflag |= CS6;
-            break;
-        case 7:
-            tio.c_cflag |= CS7;
-            break;
-        case 8:
-            tio.c_cflag |= CS8;
-            break;
-        default:
-            tio_error_printf("Invalid data bits");
-            exit(EXIT_FAILURE);
-    }
+    sp_set_config_bits(cfgPort, option.databits);
 
     /* Set flow control */
     if (strcmp("hard", option.flow) == 0)
     {
-        tio.c_cflag |= CRTSCTS;
-        tio.c_iflag &= ~(IXON | IXOFF | IXANY);
+        sp_set_config_flowcontrol(cfgPort, SP_FLOWCONTROL_RTSCTS);
     }
     else if (strcmp("soft", option.flow) == 0)
     {
-        tio.c_cflag &= ~CRTSCTS;
-        tio.c_iflag |= IXON | IXOFF;
+        sp_set_config_flowcontrol(cfgPort, SP_FLOWCONTROL_XONXOFF);
     }
     else if (strcmp("none", option.flow) == 0)
     {
-        tio.c_cflag &= ~CRTSCTS;
-        tio.c_iflag &= ~(IXON | IXOFF | IXANY);
+        sp_set_config_flowcontrol(cfgPort, SP_FLOWCONTROL_NONE);
     }
     else
     {
@@ -978,139 +820,40 @@ void tty_configure(void)
     }
 
     /* Set stopbits */
-    switch (option.stopbits)
-    {
-        case 1:
-            tio.c_cflag &= ~CSTOPB;
-            break;
-        case 2:
-            tio.c_cflag |= CSTOPB;
-            break;
-        default:
-            tio_error_printf("Invalid stop bits");
-            exit(EXIT_FAILURE);
-    }
+    sp_set_config_stopbits(cfgPort, option.stopbits);
 
     /* Set parity */
     if (strcmp("odd", option.parity) == 0)
     {
-        tio.c_cflag |= PARENB;
-        tio.c_cflag |= PARODD;
+        sp_set_config_parity(cfgPort, SP_PARITY_ODD);
     }
     else if (strcmp("even", option.parity) == 0)
     {
-        tio.c_cflag |= PARENB;
-        tio.c_cflag &= ~PARODD;
+       sp_set_config_parity(cfgPort, SP_PARITY_EVEN);
     }
     else if (strcmp("none", option.parity) == 0)
     {
-        tio.c_cflag &= ~PARENB;
+        sp_set_config_parity(cfgPort, SP_PARITY_NONE);
     }
     else if ( strcmp("mark", option.parity) == 0)
     {
-        tio.c_cflag |= PARENB;
-        tio.c_cflag |= PARODD;
-        tio.c_cflag |= CMSPAR;
+        sp_set_config_parity(cfgPort, SP_PARITY_MARK);
     }
     else if ( strcmp("space", option.parity) == 0)
     {
-        tio.c_cflag |= PARENB;
-        tio.c_cflag &= ~PARODD;
-        tio.c_cflag |= CMSPAR;
+        sp_set_config_parity(cfgPort, SP_PARITY_SPACE);
     }
     else
     {
         tio_error_printf("Invalid parity");
         exit(EXIT_FAILURE);
     }
-
-    /* Control, input, output, local modes for tty device */
-    tio.c_cflag |= CLOCAL | CREAD;
-    tio.c_oflag = 0;
-    tio.c_lflag = 0;
-
-    /* Control characters */
-    tio.c_cc[VTIME] = 0; // Inter-character timer unused
-    tio.c_cc[VMIN]  = 1; // Blocking read until 1 character received
-
-    /* Configure any specified input or output mappings */
-    buffer = strdup(option.map);
-    while (token_found == true)
-    {
-        if (token == NULL)
-        {
-            token = strtok(buffer,",");
-        }
-        else
-        {
-            token = strtok(NULL, ",");
-        }
-
-        if (token != NULL)
-        {
-            if (strcmp(token,"INLCR") == 0)
-            {
-                tio.c_iflag |= INLCR;
-                map_i_nl_cr = true;
-            }
-            else if (strcmp(token,"IGNCR") == 0)
-            {
-                tio.c_iflag |= IGNCR;
-                map_ign_cr = true;
-            }
-            else if (strcmp(token,"ICRNL") == 0)
-            {
-                tio.c_iflag |= ICRNL;
-                map_i_cr_nl = true;
-            }
-            else if (strcmp(token,"OCRNL") == 0)
-            {
-                map_o_cr_nl = true;
-            }
-            else if (strcmp(token,"ODELBS") == 0)
-            {
-                map_o_del_bs = true;
-            }
-            else if (strcmp(token,"IFFESCC") == 0)
-            {
-                map_i_ff_escc = true;
-            }
-            else if (strcmp(token,"INLCRNL") == 0)
-            {
-                map_i_nl_crnl = true;
-            }
-            else if (strcmp(token, "ONLCRNL") == 0)
-            {
-                map_o_nl_crnl = true;
-            }
-            else if (strcmp(token, "OLTU") == 0)
-            {
-                map_o_ltu = true;
-            }
-            else if (strcmp(token, "MSB2LSB") == 0)
-            {
-                map_o_msblsb = true;
-            }
-            else
-            {
-                printf("Error: Unknown mapping flag %s\n", token);
-                exit(EXIT_FAILURE);
-            }
-        }
-        else
-        {
-            token_found = false;
-        }
-    }
-    free(buffer);
 }
 
 void tty_wait_for_device(void)
 {
-    fd_set rdfs;
     int    status;
-    int    maxfd;
-    struct timeval tv;
+    int    timeout;
     static char input_char;
     static bool first = true;
     static int last_errno = 0;
@@ -1125,32 +868,29 @@ void tty_wait_for_device(void)
             if (first)
             {
                 /* Don't wait first time */
-                tv.tv_sec = 0;
-                tv.tv_usec = 1;
+                timeout = 0;
                 first = false;
             }
             else
             {
                 /* Wait up to 1 second for input */
-                tv.tv_sec = 1;
-                tv.tv_usec = 0;
+                timeout = 1;
             }
 
-            FD_ZERO(&rdfs);
-            FD_SET(pipefd[0], &rdfs);
-            maxfd = MAX(pipefd[0], socket_add_fds(&rdfs, false));
+            pollfd_t pollfd;
+            pollfd.fd = RING_GetWaitable(ring, RING_Available);
+            pollfd.events = POLL_IN;
 
             /* Block until input becomes available or timeout */
-            status = select(maxfd + 1, &rdfs, NULL, NULL, &tv);
+            status = poll(&pollfd, 1, timeout);
             if (status > 0)
             {
-                if (FD_ISSET(pipefd[0], &rdfs))
+                /* Input from stdin ready */
+                if (pollfd.revents & POLL_IN)
                 {
-                    /* Input from stdin ready */
-
                     /* Read one character */
-                    status = read(pipefd[0], &input_char, 1);
-                    if (status <= 0)
+                    status = RING_Read(ring, &input_char, 1);
+                    if (status == 0)
                     {
                         tio_error_printf("Could not read from stdin");
                         exit(EXIT_FAILURE);
@@ -1159,23 +899,29 @@ void tty_wait_for_device(void)
                     /* Handle commands */
                     handle_command_sequence(input_char, NULL, NULL);
                 }
-                socket_handle_input(&rdfs, NULL);
             }
             else if (status == -1)
             {
-                tio_error_printf("select() failed (%s)", strerror(errno));
+                tio_error_printf("poll() failed (%s)", strerror(errno));
                 exit(EXIT_FAILURE);
             }
         }
 
-        /* Test for accessible device file */
-        status = access(option.tty_device, R_OK);
-        if (status == 0)
+        /* Open tty device */
+        if (sp_get_port_by_name(option.tty_device, &hPort) == SP_OK)
         {
-            last_errno = 0;
-            return;
+            if (sp_open(hPort, SP_MODE_READ_WRITE) == SP_OK)
+            {
+                last_errno = 0;
+                return;
+            }
+            else
+            {
+                sp_free_port(hPort);
+            }
         }
-        else if (last_errno != errno)
+
+        if (last_errno != errno)
         {
             tio_warning_printf("Could not open tty device (%s)", strerror(errno));
             tio_printf("Waiting for tty device..");
@@ -1194,12 +940,12 @@ void tty_wait_for_device(void)
 
 void tty_disconnect(void)
 {
-    if (connected)
+    if (InterlockedCompareExchange(&connected, false, true))
     {
         tio_printf("Disconnected");
-        flock(fd, LOCK_UN);
-        close(fd);
-        connected = false;
+
+        sp_close(hPort);
+        sp_free_port(hPort);
 
         /* Fire alert action */
         alert_disconnect();
@@ -1208,13 +954,7 @@ void tty_disconnect(void)
 
 void tty_restore(void)
 {
-    tcsetattr(fd, TCSANOW, &tio_old);
-
-    if (option.rs485)
-    {
-        /* Restore original RS-485 mode */
-        rs485_mode_restore(fd);
-    }
+    sp_set_config(hPort, cfgPort_old);
 
     if (connected)
     {
@@ -1222,7 +962,7 @@ void tty_restore(void)
     }
 }
 
-void forward_to_tty(int fd, char output_char)
+void forward_to_tty(char output_char)
 {
     int status;
 
@@ -1243,7 +983,7 @@ void forward_to_tty(int fd, char output_char)
 
         optional_local_echo(crlf[0]);
         optional_local_echo(crlf[1]);
-        status = tty_write(fd, crlf, 2);
+        status = tty_write(crlf, 2);
         if (status < 0)
         {
             tio_warning_printf("Could not write to tty device");
@@ -1261,7 +1001,7 @@ void forward_to_tty(int fd, char output_char)
         {
             /* Send output to tty device */
             optional_local_echo(output_char);
-            status = tty_write(fd, &output_char, 1);
+            status = tty_write(&output_char, 1);
             if (status < 0)
             {
                 tio_warning_printf("Could not write to tty device");
@@ -1275,43 +1015,16 @@ void forward_to_tty(int fd, char output_char)
 
 int tty_connect(void)
 {
-    fd_set rdfs;           /* Read file descriptor set */
-    int    maxfd;          /* Maximum file descriptor used */
     char   input_char, output_char;
     char   input_buffer[BUFSIZ];
     static bool first = true;
     int    status;
     bool   next_timestamp = false;
     char*  now = NULL;
-    struct timeval tv;
-    struct timeval *tv_p = &tv;
     bool ignore_stdin = false;
 
-    /* Open tty device */
-    fd = open(option.tty_device, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0)
-    {
-        tio_error_printf_silent("Could not open tty device (%s)", strerror(errno));
-        goto error_open;
-    }
-
-    /* Make sure device is of tty type */
-    if (!isatty(fd))
-    {
-        tio_error_printf("Not a tty device");
-        exit(EXIT_FAILURE);;
-    }
-
-    /* Lock device file */
-    status = flock(fd, LOCK_EX | LOCK_NB);
-    if ((status == -1) && (errno == EWOULDBLOCK))
-    {
-        tio_error_printf("Device file is locked by another process");
-        exit(EXIT_FAILURE);
-    }
-
     /* Flush stale I/O data (if any) */
-    tcflush(fd, TCIOFLUSH);
+    sp_drain(hPort);
 
     /* Print connect status */
     tio_printf("Connected");
@@ -1337,25 +1050,10 @@ int tty_connect(void)
     }
 
     /* Save current port settings */
-    if (tcgetattr(fd, &tio_old) < 0)
+    if (sp_get_config(hPort, cfgPort_old) < 0)
     {
         tio_error_printf_silent("Could not get port settings (%s)", strerror(errno));
         goto error_tcgetattr;
-    }
-
-#ifdef HAVE_IOSSIOSPEED
-    if (!standard_baudrate)
-    {
-        /* OS X wants these fields left alone before setting arbitrary baud rate */
-        tio.c_ispeed = tio_old.c_ispeed;
-        tio.c_ospeed = tio_old.c_ospeed;
-    }
-#endif
-
-    /* Manage RS-485 mode */
-    if (option.rs485)
-    {
-        rs485_mode_enable(fd);
     }
 
     /* Make sure we restore tty settings on exit */
@@ -1366,57 +1064,45 @@ int tty_connect(void)
     }
 
     /* Activate new port settings */
-    status = tcsetattr(fd, TCSANOW, &tio);
-    if (status == -1)
+    if (sp_set_config(hPort,cfgPort) < 0)
     {
         tio_error_printf_silent("Could not apply port settings (%s)", strerror(errno));
         goto error_tcsetattr;
     }
 
-    /* Set arbitrary baudrate (only works on supported platforms) */
-    if (!standard_baudrate)
-    {
-        if (setspeed(fd, option.baudrate) != 0)
-        {
-            tio_error_printf_silent("Could not set baudrate speed (%s)", strerror(errno));
-            goto error_setspeed;
-        }
-    }
+    if(sp_event)
+        sp_free_event_set(sp_event);
+    sp_new_event_set(&sp_event);
+    sp_add_port_events(sp_event, hPort, SP_EVENT_RX_READY);
 
     /* Input loop */
     while (true)
     {
-        FD_ZERO(&rdfs);
-        FD_SET(fd, &rdfs);
+        pollfd_t pollfd[2];
         if (!ignore_stdin)
         {
-            FD_SET(pipefd[0], &rdfs);
-        }
-        maxfd = MAX(fd, pipefd[0]);
-        maxfd = MAX(maxfd, socket_add_fds(&rdfs, true));
-
-        /* Manage timeout */
-        if ((option.response_wait) && (option.response_timeout != 0))
-        {
-            // Set response timeout
-            tv_p->tv_sec = 0;
-            tv_p->tv_usec = option.response_timeout * 1000;
+            pollfd[1].fd = RING_GetWaitable(ring, RING_Available);
+            pollfd[1].events = POLL_IN;
         }
         else
         {
-            // No timeout
-            tv_p = NULL;
+            pollfd[1].fd = 0;
+            pollfd[1].events = 0;
+            pollfd[1].revents = 0;
         }
+        pollfd[0].fd = ((HANDLE*)sp_event->handles)[0];
+        pollfd[0].events = POLL_IN;
 
         /* Block until input becomes available */
-        status = select(maxfd + 1, &rdfs, NULL, NULL, tv_p);
+        status = poll(pollfd, ignore_stdin ? 1 : 2,
+            (option.response_wait) && (option.response_timeout != 0) ? option.response_timeout : -1);
         if (status > 0)
         {
             bool forward = false;
-            if (FD_ISSET(fd, &rdfs))
+            if (pollfd[0].revents == POLL_IN)
             {
                 /* Input from tty device ready */
-                ssize_t bytes_read = read(fd, input_buffer, BUFSIZ);
+                ssize_t bytes_read = sp_nonblocking_read(hPort, input_buffer, BUFSIZ);
                 if (bytes_read <= 0)
                 {
                     /* Error reading - device is likely unplugged */
@@ -1485,7 +1171,7 @@ int tty_connect(void)
                         log_putc(input_char);
                     }
 
-                    socket_write(input_char);
+                    //socket_write(input_char);
 
                     print_tainted = true;
 
@@ -1498,39 +1184,20 @@ int tty_connect(void)
                     {
                         if (input_char == '\n')
                         {
-                             tty_sync(fd);
+                             tty_sync(hPort);
                              exit(EXIT_SUCCESS);
                         }
                     }
                 }
             }
-            else if (FD_ISSET(pipefd[0], &rdfs))
+            else if (pollfd[1].revents == POLL_IN)
             {
                 /* Input from stdin ready */
-                ssize_t bytes_read = read(pipefd[0], input_buffer, BUFSIZ);
-                if (bytes_read < 0)
+                ssize_t bytes_read = RING_Read(ring, input_buffer, BUFSIZ);
+                if (bytes_read == 0)
                 {
                     tio_error_printf_silent("Could not read from stdin (%s)", strerror(errno));
                     goto error_read;
-                }
-                else if (bytes_read == 0)
-                {
-                    /* Reached EOF (when piping to stdin) */
-                    if (option.response_wait)
-                    {
-                        /* Stdin pipe closed but not blocking so stop listening
-                         * to stdin in response mode.
-                         *
-                         * Note: select() really indicates not if data is ready
-                         * but if file descriptor is non-blocking for I/O
-                         * operation. */
-                        ignore_stdin = true;
-                    }
-                    else
-                    {
-                        tty_sync(fd);
-                        exit(EXIT_SUCCESS);
-                    }
                 }
 
                 /* Process input byte by byte */
@@ -1565,23 +1232,23 @@ int tty_connect(void)
 
                     if (forward)
                     {
-                        forward_to_tty(fd, output_char);
+                        forward_to_tty(output_char);
                     }
                 }
 
-                tty_sync(fd);
+                tty_sync(hPort);
             }
             else
             {
                 /* Input from socket ready */
-                forward = socket_handle_input(&rdfs, &output_char);
+                // forward = socket_handle_input(&rdfs, &output_char);
 
-                if (forward)
-                {
-                    forward_to_tty(fd, output_char);
-                }
+                // if (forward)
+                // {
+                //     forward_to_tty(hPort, output_char);
+                // }
 
-                tty_sync(fd);
+                // tty_sync(hPort);
             }
         }
         else if (status == -1)
@@ -1598,7 +1265,7 @@ int tty_connect(void)
                 break; // tty_disconnect() will be naturally triggered by atexit()
             }
 #else
-            tio_error_printf("select() failed (%s)", strerror(errno));
+            tio_error_printf("poll() failed (%s)", strerror(errno));
             exit(EXIT_FAILURE);
 #endif
         }
@@ -1611,31 +1278,32 @@ int tty_connect(void)
 
     return TIO_SUCCESS;
 
-error_setspeed:
 error_tcsetattr:
 error_tcgetattr:
 error_read:
     tty_disconnect();
-error_open:
     return TIO_ERROR;
 }
 
+#define MAX_PORT_NUM (256)
+#define MAX_STR_LEN (256 * sizeof(char))
+
 void list_serial_devices(void)
 {
-    DIR *d = opendir(PATH_SERIAL_DEVICES);
-    if (d)
+    char portName[MAX_PORT_NUM][MAX_STR_LEN];
+    char friendlyName[MAX_PORT_NUM][MAX_STR_LEN];
+    unsigned int i;
+    unsigned int n;
+
+    for (i = 0; i < MAX_PORT_NUM; i++)
     {
-        struct dirent *dir;
-        while ((dir = readdir(d)) != NULL)
-        {
-            if ((strcmp(dir->d_name, ".")) && (strcmp(dir->d_name, "..")))
-            {
-                if (!strncmp(dir->d_name, PREFIX_TTY_DEVICES, sizeof(PREFIX_TTY_DEVICES) - 1))
-                {
-                    printf("%s%s\n", PATH_SERIAL_DEVICES, dir->d_name);
-                }
-            }
-        }
-        closedir(d);
-    }
+        ZeroMemory(&portName[i][0], MAX_STR_LEN);
+        ZeroMemory(&friendlyName[i][0], MAX_STR_LEN);
+    } /*for i[i MAX_PORT_NUM]*/
+
+    EnumerateComPortSetupAPISetupDiClassGuidsFromNamePort(&n, &portName[0][0],
+                                                          MAX_STR_LEN, &friendlyName[0][0]);
+
+    for (i = 0; i < n; i++)
+        printf(TEXT("%s\t <%s> \n"), &portName[i][0], &friendlyName[i][0]);
 }

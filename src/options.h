@@ -24,7 +24,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
-#include <termios.h>
 #include <sys/param.h>
 #include "timestamp.h"
 #include "alert.h"
@@ -42,10 +41,7 @@ struct option_t
     int output_line_delay;
     unsigned int dtr_pulse_duration;
     unsigned int rts_pulse_duration;
-    unsigned int cts_pulse_duration;
-    unsigned int dsr_pulse_duration;
-    unsigned int dcd_pulse_duration;
-    unsigned int ri_pulse_duration;
+    unsigned int pulse_duration;
     bool no_autoconnect;
     bool log;
     bool log_append;
@@ -53,7 +49,6 @@ struct option_t
     bool local_echo;
     enum timestamp_t timestamp;
     const char *log_filename;
-    const char *map;
     const char *socket;
     int color;
     bool hex_mode;
@@ -63,10 +58,6 @@ struct option_t
     bool response_wait;
     int response_timeout;
     bool mute;
-    bool rs485;
-    uint32_t rs485_config_flags;
-    int32_t rs485_delay_rts_before_send;
-    int32_t rs485_delay_rts_after_send;
     enum alert_t alert;
     bool complete_sub_configs;
 };

@@ -19,7 +19,6 @@
  * 02110-1301, USA.
  */
 
-#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -117,7 +116,6 @@ int main(int argc, char *argv[])
     /* Open socket */
     if (option.socket)
     {
-        socket_configure();
     }
 
     /* Spawn input handling into separate thread */

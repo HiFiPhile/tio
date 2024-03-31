@@ -16,9 +16,9 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
-#include <termios.h>
+#include "serialport.h"
 #include "misc.h"
+#include "mmap.h"
 
 #define STX 0x02
 #define ACK 0x06
@@ -29,7 +29,9 @@
 #define OK  0
 #define ERR (-1)
 
+#ifndef min
 #define min(a, b)       ((a) < (b) ? (a) : (b))
+#endif
 
 struct xpacket {
     uint8_t  type;
@@ -53,12 +55,20 @@ static uint16_t crc16(const uint8_t *data, uint16_t size)
     return crc;
 }
 
-static int xmodem(int sio, const void *data, size_t len, int seq)
+static char *
+stpcpy (char *dest, const char *src)
+{
+  size_t len = strlen (src);
+  return memcpy (dest, src, len + 1) + len;
+}
+
+static int xmodem(struct sp_port *port, const void *data, size_t len, int seq)
 {
     struct xpacket  packet;
     const uint8_t  *buf = data;
     char            resp = 0;
-    int             rc, crc;
+    int             crc;
+    enum sp_return ret;
 
     /* Drain pending characters from serial line. Insist on the
      * last drained character being 'C'.
@@ -66,21 +76,20 @@ static int xmodem(int sio, const void *data, size_t len, int seq)
     while(1) {
         if (key_hit)
             return -1;
-        if (read(sio, &resp, 1) < 0) {
-            if (errno == EWOULDBLOCK) {
-                if (resp == 'C') break;
-                if (resp == CAN) return ERR;
-                usleep(50000);
-                continue;
-            }
+        ret = sp_blocking_read(port, &resp, 1, 50);
+        if(ret < 0) {
             perror("Read sync from serial failed");
             return ERR;
+        }
+        else if(ret == 1) {
+            if (resp == 'C') break;
+            if (resp == CAN) return ERR;
         }
     }
 
     /* Always work with 1K packets */
     packet.seq  = seq;
-    packet.type = STX; 
+    packet.type = STX;
 
     while (len) {
         size_t  sz, z = 0;
@@ -101,16 +110,14 @@ static int xmodem(int sio, const void *data, size_t len, int seq)
         while (sz) {
             if (key_hit)
                 return ERR;
-            if ((rc = write(sio, from, sz)) < 0 ) {
-                if (errno ==  EWOULDBLOCK) {
-                    usleep(1000);
-                    continue;
-                }
+            ret = sp_blocking_write(port, from, sz, 0);
+            if(ret < 0) {
                 perror("Write packet to serial failed");
                 return ERR;
             }
-            from += rc;
-            sz   -= rc;
+
+            from += ret;
+            sz   -= ret;
         }
 
         /* 'lrzsz' does not ACK ymodem's fin packet */
@@ -120,15 +127,11 @@ static int xmodem(int sio, const void *data, size_t len, int seq)
         for(int n=0; n < 20; n++) {
             if (key_hit)
                 return ERR;
-            if (read(sio, &resp, 1) < 0) {
-                if (errno ==  EWOULDBLOCK) {
-                    usleep(50000);
-                    continue;
-                }
-                perror("Read ack/nak from serial failed");
+            ret = sp_blocking_read(port, &resp, 1, 50);
+            if(ret < 0) {
+                perror("Read sync from serial failed");
                 return ERR;
-            }
-            break;
+            } else if(ret == 1) break;
         }
 
         /* Update "progress bar" */
@@ -153,17 +156,18 @@ static int xmodem(int sio, const void *data, size_t len, int seq)
     while (seq) {
         if (key_hit)
             return ERR;
-        if (write(sio, EOT, 1) < 0) {
-            perror("Write EOT to serial failed");
+        ret = sp_blocking_write(port, EOT, 1, 0);
+        if(ret < 0) {
+            perror("Write packet to serial failed");
             return ERR;
         }
         write(STDOUT_FILENO, "|", 1);
         usleep(1000000); /* 1 s timeout*/
-        if (read(sio, &resp, 1) < 0) {
-            if (errno == EWOULDBLOCK) continue;
-            perror("Read from serial failed");
+        ret = sp_blocking_read(port, &resp, 1, 50);
+        if(ret < 0) {
+            perror("Read sync from serial failed");
             return ERR;
-        }
+        } else if (ret == 0) continue;
         if (resp == ACK || resp == CAN) {
             write(STDOUT_FILENO, "\r\n", 2);
             return (resp == ACK) ? OK : ERR;
@@ -172,7 +176,7 @@ static int xmodem(int sio, const void *data, size_t len, int seq)
     return 0; /* not reached */
 }
 
-int xymodem_send(int sio, const char *filename, char mode)
+int xymodem_send(struct sp_port *port, const char *filename, char mode)
 {
     size_t         len;
     int            rc, fd;
@@ -197,7 +201,7 @@ int xymodem_send(int sio, const char *filename, char mode)
     /* Do transfer */
     key_hit = 0;
     if (mode == 'x') {
-        rc = xmodem(sio, buf, len, 1);
+        rc = xmodem(port, buf, len, 1);
     }
     else {
         /* Ymodem: hdr + file + fin */
@@ -207,18 +211,18 @@ int xymodem_send(int sio, const char *filename, char mode)
             rc = -1;
             if (strlen(filename) > 977) break; /* hdr block overrun */
             p  = stpcpy(hdr, filename) + 1;
-            p += sprintf(p, "%ld %lo %o", len, stat.st_mtime, stat.st_mode);
+            p += sprintf(p, "%lld %llo %o", len, stat.st_mtime, stat.st_mode);
 
-            if (xmodem(sio, hdr, p - hdr, 0) < 0) break; /* hdr with metadata */
-            if (xmodem(sio, buf, len,     1) < 0) break; /* xmodem file */
-            if (xmodem(sio, "",  1,       0) < 0) break; /* empty hdr = fin */
+            if (xmodem(port, hdr, p - hdr, 0) < 0) break; /* hdr with metadata */
+            if (xmodem(port, buf, len,     1) < 0) break; /* xmodem file */
+            if (xmodem(port, "",  1,       0) < 0) break; /* empty hdr = fin */
             rc = 0;                               break;
         }
     }
     key_hit = 0xff;
 
     /* Flush serial and release resources */
-    tcflush(sio, TCIOFLUSH);
+    sp_drain(port);
     munmap((void *)buf, len);
     close(fd);
     return rc;

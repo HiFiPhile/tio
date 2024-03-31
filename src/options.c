@@ -19,7 +19,6 @@
  * 02110-1301, USA.
  */
 
-#include "config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string.h>
@@ -28,14 +27,12 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <getopt.h>
-#include <termios.h>
 #include <limits.h>
 #include "options.h"
 #include "error.h"
 #include "misc.h"
 #include "print.h"
 #include "tty.h"
-#include "rs485.h"
 #include "timestamp.h"
 #include "alert.h"
 #include "log.h"
@@ -49,8 +46,6 @@ enum opt_t
     OPT_LOG_APPEND,
     OPT_LINE_PULSE_DURATION,
     OPT_RESPONSE_TIMEOUT,
-    OPT_RS485,
-    OPT_RS485_CONFIG,
     OPT_ALERT,
     OPT_COMPLETE_SUB_CONFIGS,
     OPT_MUTE,
@@ -69,10 +64,7 @@ struct option_t option =
     .output_line_delay = 0,
     .dtr_pulse_duration = 100,
     .rts_pulse_duration = 100,
-    .cts_pulse_duration = 100,
-    .dsr_pulse_duration = 100,
-    .dcd_pulse_duration = 100,
-    .ri_pulse_duration = 100,
+    .pulse_duration = 100,
     .no_autoconnect = false,
     .log = false,
     .log_append = false,
@@ -81,7 +73,6 @@ struct option_t option =
     .local_echo = false,
     .timestamp = TIMESTAMP_NONE,
     .socket = NULL,
-    .map = "",
     .color = 256, // Bold
     .hex_mode = false,
     .prefix_code = 20, // ctrl-t
@@ -90,10 +81,6 @@ struct option_t option =
     .response_wait = false,
     .response_timeout = 100,
     .mute = false,
-    .rs485 = false,
-    .rs485_config_flags = 0,
-    .rs485_delay_rts_before_send = -1,
-    .rs485_delay_rts_after_send = -1,
     .alert = ALERT_NONE,
     .complete_sub_configs = false,
 };
@@ -124,14 +111,11 @@ void print_help(char *argv[])
     printf("      --log-file <filename>              Set log filename\n");
     printf("      --log-append                       Append to log file\n");
     printf("      --log-strip                        Strip control characters and escape sequences\n");
-    printf("  -m, --map <flags>                      Map characters\n");
     printf("  -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)\n");
     printf("  -S, --socket <socket>                  Redirect I/O to socket\n");
     printf("  -x, --hexadecimal                      Enable hexadecimal mode\n");
     printf("  -r, --response-wait                    Wait for line response then quit\n");
     printf("      --response-timeout <ms>            Response timeout (default: 100)\n");
-    printf("      --rs-485                           Enable RS-485 mode\n");
-    printf("      --rs-485-config <config>           Set RS-485 configuration\n");
     printf("      --alert bell|blink|none            Alert on connect/disconnect (default: none)\n");
     printf("      --mute                             Mute tio\n");
     printf("  -v, --version                          Display version\n");
@@ -177,21 +161,9 @@ void line_pulse_duration_option_parse(const char *arg)
             {
                 option.rts_pulse_duration = value;
             }
-            else if (!strcmp(keyname, "CTS"))
+            else if (!strcmp(keyname, "DEF"))
             {
-                option.cts_pulse_duration = value;
-            }
-            else if (!strcmp(keyname, "DSR"))
-            {
-                option.dsr_pulse_duration = value;
-            }
-            else if (!strcmp(keyname, "DCD"))
-            {
-                option.dcd_pulse_duration = value;
-            }
-            else if (!strcmp(keyname, "RI"))
-            {
-                option.ri_pulse_duration = value;
+                option.pulse_duration = value;
             }
         }
         else
@@ -215,15 +187,10 @@ void options_print()
     tio_printf(" Output delay: %d", option.output_delay);
     tio_printf(" Output line delay: %d", option.output_line_delay);
     tio_printf(" Auto connect: %s", option.no_autoconnect ? "disabled" : "enabled");
-    tio_printf(" Pulse duration: DTR=%d RTS=%d CTS=%d DSR=%d DCD=%d RI=%d", option.dtr_pulse_duration,
+    tio_printf(" Pulse duration: DTR=%d RTS=%d DEF=%d ", option.dtr_pulse_duration,
                                                                             option.rts_pulse_duration,
-                                                                            option.cts_pulse_duration,
-                                                                            option.dsr_pulse_duration,
-                                                                            option.dcd_pulse_duration,
-                                                                            option.ri_pulse_duration);
+                                                                            option.pulse_duration);
     tio_printf(" Hexadecimal mode: %s", option.hex_mode ? "enabled" : "disabled");
-    if (option.map[0] != 0)
-        tio_printf(" Map flags: %s", option.map);
     if (option.log)
         tio_printf(" Log file: %s", log_get_filename());
     if (option.socket)
@@ -272,8 +239,6 @@ void options_parse(int argc, char *argv[])
             {"hexadecimal",          no_argument,       0, 'x'                     },
             {"response-wait",        no_argument,       0, 'r'                     },
             {"response-timeout",     required_argument, 0, OPT_RESPONSE_TIMEOUT    },
-            {"rs-485",               no_argument,       0, OPT_RS485               },
-            {"rs-485-config",        required_argument, 0, OPT_RS485_CONFIG        },
             {"alert",                required_argument, 0, OPT_ALERT               },
             {"mute",                 no_argument,       0, OPT_MUTE                },
             {"version",              no_argument,       0, 'v'                     },
@@ -377,10 +342,6 @@ void options_parse(int argc, char *argv[])
                 option.socket = optarg;
                 break;
 
-            case 'm':
-                option.map = optarg;
-                break;
-
             case 'c':
                 if (!strcmp(optarg, "list"))
                 {
@@ -421,14 +382,6 @@ void options_parse(int argc, char *argv[])
 
             case OPT_RESPONSE_TIMEOUT:
                 option.response_timeout = string_to_long(optarg);
-                break;
-
-            case OPT_RS485:
-                option.rs485 = true;
-                break;
-
-            case OPT_RS485_CONFIG:
-                rs485_parse_config(optarg);
                 break;
 
             case OPT_ALERT:
@@ -508,7 +461,7 @@ void options_parse_final(int argc, char *argv[])
     if ( ((strncmp("COM", tty_device, 3) == 0)
         || (strncmp("com", tty_device, 3) == 0) )
         && (sscanf(tty_device + 3, "%hhu", &portnum) == 1)
-        && (portnum > 0) ) 
+        && (portnum > 0) )
     {
         asprintf(&tty_win, "/dev/ttyS%hhu", portnum - 1);
         tty_device = tty_win;

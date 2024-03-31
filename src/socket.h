@@ -23,9 +23,8 @@
 #pragma once
 
 #include <stdbool.h>
-#include <sys/select.h>
 
 void socket_configure(void);
 void socket_write(char input_char);
-int socket_add_fds(fd_set *fds, bool connected);
-bool socket_handle_input(fd_set *fds, char *output_char);
+int socket_add_fds(bool connected);
+bool socket_handle_input(char *output_char);

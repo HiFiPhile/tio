@@ -21,7 +21,7 @@
 
 #define __STDC_WANT_LIB_EXT2__ 1   // To access vasprintf
 
-#include "config.h"
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -47,11 +47,13 @@ static char *date_time(void)
     static char date_time_string[50];
     struct tm *tm;
     struct timeval tv;
+    time_t tt;
 
     gettimeofday(&tv, NULL);
 
-    tm = localtime(&tv.tv_sec);
-    strftime(date_time_string, sizeof(date_time_string), "%Y-%m-%dT%H:%M:%S", tm);
+    tt = tv.tv_sec;
+    tm = localtime(&tt);
+    strftime(date_time_string, sizeof(date_time_string), "%Y-%m-%dT%H.%M.%S", tm);
 
     return date_time_string;
 }

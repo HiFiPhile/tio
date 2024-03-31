@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "serialport.h"
+
 #define UNUSED(expr) do { (void)(expr); } while (0)
 
 char * current_time(void);
@@ -31,4 +33,4 @@ void alert_connect(void);
 void alert_disconnect(void);
 
 extern char key_hit;
-int xymodem_send(int sio, const char *filename, char mode);
+int xymodem_send(struct sp_port *port, const char *filename, char mode);

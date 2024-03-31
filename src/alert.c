@@ -19,13 +19,11 @@
  * 02110-1301, USA.
  */
 
-#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include "error.h"
-#include "print.h"
 #include "options.h"
 
 enum alert_t alert_option_parse(const char *arg)

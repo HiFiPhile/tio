@@ -22,7 +22,6 @@
 
 #define _GNU_SOURCE
 
-#include "config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string.h>
@@ -31,10 +30,8 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <getopt.h>
-#include <termios.h>
 #include <limits.h>
 #include <unistd.h>
-#include <regex.h>
 #include <ini.h>
 #include "options.h"
 #include "configfile.h"
@@ -42,7 +39,6 @@
 #include "options.h"
 #include "error.h"
 #include "print.h"
-#include "rs485.h"
 #include "timestamp.h"
 #include "alert.h"
 
@@ -63,40 +59,6 @@ struct config_t
 };
 
 static struct config_t c;
-
-static int get_match(const char *input, const char *pattern, char **match)
-{
-    int ret;
-    int len = 0;
-    regex_t re;
-    regmatch_t m[2];
-    char err[128];
-
-    /* compile a regex with the pattern */
-    ret = regcomp(&re, pattern, REG_EXTENDED);
-    if (ret)
-    {
-        regerror(ret, &re, err, sizeof(err));
-        tio_error_printf("Regex failure: %s", err);
-        return ret;
-    }
-
-    /* try to match on input */
-    ret = regexec(&re, input, 2, m, 0);
-    if (!ret)
-    {
-        len = m[1].rm_eo - m[1].rm_so;
-    }
-
-    regfree(&re);
-
-    if (len)
-    {
-        asprintf(match, "%s", &input[m[1].rm_so]);
-    }
-
-    return len;
-}
 
 static bool read_boolean(const char *value, const char *name)
 {
@@ -223,11 +185,6 @@ static int data_handler(void *user, const char *section, const char *name,
         {
             option.timestamp = timestamp_option_parse(value);
         }
-        else if (!strcmp(name, "map"))
-        {
-            asprintf(&c.map, "%s", value);
-            option.map = c.map;
-        }
         else if (!strcmp(name, "color"))
         {
             if (!strcmp(value, "list"))
@@ -277,14 +234,6 @@ static int data_handler(void *user, const char *section, const char *name,
         {
             option.response_timeout = read_integer(value, name, 0, LONG_MAX);
         }
-        else if (!strcmp(name, "rs-485"))
-        {
-            option.rs485 = read_boolean(value, name);
-        }
-        else if (!strcmp(name, "rs-485-config"))
-        {
-            rs485_parse_config(value);
-        }
         else if (!strcmp(name, "alert"))
         {
             option.alert = alert_option_parse(value);
@@ -324,11 +273,6 @@ static int section_pattern_search_handler(void *user, const char *section, const
     if (!strcmp(varval, c.user))
     {
         /* pattern matches as plain text */
-        asprintf(&c.section_name, "%s", section);
-    }
-    else if (get_match(c.user, varval, &c.match) > 0)
-    {
-        /* pattern matches as regex */
         asprintf(&c.section_name, "%s", section);
     }
 
@@ -377,10 +321,17 @@ static int section_name_print_handler(void *user, const char *section, const cha
 
 static int resolve_config_file(void)
 {
-    char *xdg = getenv("XDG_CONFIG_HOME");
-    if (xdg)
+    char *home = getenv("USERPROFILE");
+    if (home)
     {
-        asprintf(&c.path, "%s/tio/config", xdg);
+        asprintf(&c.path, "%s/.config/tio/config", home);
+        if (access(c.path, F_OK) == 0)
+        {
+            return 0;
+        }
+        free(c.path);
+
+        asprintf(&c.path, "%s/.tioconfig", home);
         if (access(c.path, F_OK) == 0)
         {
             return 0;
@@ -388,7 +339,7 @@ static int resolve_config_file(void)
         free(c.path);
     }
 
-    char *home = getenv("HOME");
+    home = getenv("HOME");
     if (home)
     {
         asprintf(&c.path, "%s/.config/tio/config", home);

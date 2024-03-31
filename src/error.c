@@ -20,8 +20,8 @@
  */
 
 #define __STDC_WANT_LIB_EXT2__ 1   // To access vasprintf
+#define _GNU_SOURCE
 
-#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
