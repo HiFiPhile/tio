@@ -23,7 +23,7 @@ INCLUDES= -I./ \
 
 DEFINES = \
 	$(COMPILER_DEFINES) \
-	-DVERSION=\"Win32_Port\" \
+	-DVERSION=\"Win32\ Port\" \
 
 APPLICATION_FILES= \
     ../src/error.c \
@@ -49,7 +49,7 @@ COMPILER_FLAGS ?= \
 	-fdata-sections \
 	-ffunction-sections \
 	-Wall \
-	-O0 \
+	-O2 \
 	-g \
 
 ifeq ($(MSYSTEM),MINGW64)

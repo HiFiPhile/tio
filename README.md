@@ -10,7 +10,7 @@ Cygwin serial port quirks and dependency issue.
 - RS-485 mode removed due to incompatibility
 - Regex in config file removed due to Windows COM port naming
 - Socket is WIP
-- Not all configurations are tested
+- Not well tested
 
 ## 1. Introduction
 

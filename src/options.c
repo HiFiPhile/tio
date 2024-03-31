@@ -393,7 +393,7 @@ void options_parse(int argc, char *argv[])
                 break;
 
             case 'v':
-                printf("tio v%s\n", VERSION);
+                printf("tio %s\n", VERSION);
                 exit(EXIT_SUCCESS);
                 break;
 

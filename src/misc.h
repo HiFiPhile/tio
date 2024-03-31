@@ -22,8 +22,11 @@
 #pragma once
 
 #include "serialport.h"
+#include <Windows.h>
 
 #define UNUSED(expr) do { (void)(expr); } while (0)
+
+LPSTR GetErrorMessage(DWORD dwErrorCode);
 
 char * current_time(void);
 void delay(long ms);

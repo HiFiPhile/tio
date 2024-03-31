@@ -718,9 +718,6 @@ static enum sp_return restart_wait_if_needed(struct sp_port *port, unsigned int 
     if (ClearCommError(port->hdl, &errors, &comstat) == 0)
         RETURN_FAIL("ClearCommError() failed");
 
-    if(errors)
-        DebugBreak();
-
     if (comstat.cbInQue == 0)
         TRY(restart_wait(port));
 

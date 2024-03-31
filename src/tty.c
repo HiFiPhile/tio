@@ -44,6 +44,7 @@
 #include "misc.h"
 #include "log.h"
 #include "error.h"
+#include "misc.h"
 #include "setspeed.h"
 #include "alert.h"
 #include "timestamp.h"
@@ -183,7 +184,7 @@ void tty_sync()
         if (count < 0)
         {
             // Error
-            tio_debug_printf("Write error while flushing tty buffer (%s)", strerror(errno));
+            tio_debug_printf("Write error while flushing tty buffer (%s)", GetErrorMessage(GetLastError()));
             break;
         }
         tty_buffer_count -= count;
@@ -218,7 +219,7 @@ ssize_t tty_write(const void *buffer, size_t count)
             if (retval < 0)
             {
                 // Error
-                tio_debug_printf("Write error (%s)", strerror(errno));
+                tio_debug_printf("Write error (%s)", GetErrorMessage(GetLastError()));
                 break;
             }
             bytes_written += retval;
@@ -391,10 +392,11 @@ static void toggle_line(const char *line_name, int mask, enum line_mode_t line_m
     sp_get_config_rts(config, &rts);
     if(mask & TIOCM_DTR) {
         sp_set_config_dtr(config, dtr == SP_DTR_OFF ? SP_DTR_ON : SP_DTR_OFF);
-        tio_printf("Setting %s to %s", line_name, dtr == SP_DTR_OFF ? "LOW" : "HIGH");
-    } if(mask & TIOCM_RTS) {
+        tio_printf("Setting DTR to %s", dtr == SP_DTR_OFF ? "LOW" : "HIGH");
+    }
+    if(mask & TIOCM_RTS) {
         sp_set_config_rts(config, rts == SP_RTS_OFF ? SP_RTS_ON : SP_RTS_OFF);
-        tio_printf("Setting %s to %s", line_name, rts == SP_RTS_OFF ? "LOW" : "HIGH");
+        tio_printf("Setting RTS to %s", rts == SP_RTS_OFF ? "LOW" : "HIGH");
     }
     sp_set_config(hPort, config);
     if (line_mode == LINE_PULSE)
@@ -419,10 +421,11 @@ static void toggle_line(const char *line_name, int mask, enum line_mode_t line_m
         }
         if(mask & TIOCM_DTR) {
             sp_set_config_dtr(config, dtr);
-            tio_printf("Setting %s to %s", line_name, dtr == SP_DTR_OFF ? "HIGH" : "LOW");
-        } if(mask & TIOCM_RTS) {
+            tio_printf("Setting DTR to %s", dtr == SP_DTR_OFF ? "HIGH" : "LOW");
+        }
+        if(mask & TIOCM_RTS) {
             sp_set_config_rts(config, rts);
-            tio_printf("Setting %s to %s", line_name, rts == SP_RTS_OFF ? "HIGH" : "LOW");
+            tio_printf("Setting RTS to %s", rts == SP_RTS_OFF ? "HIGH" : "LOW");
         }
         sp_set_config(hPort, config);
     }
@@ -546,7 +549,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 enum sp_signal signal;
                 if (sp_get_signals(hPort, &signal) < 0)
                 {
-                    tio_warning_printf("Could not get line state (%s)", strerror(errno));
+                    tio_warning_printf("Could not get line state (%s)", GetErrorMessage(GetLastError()));
                     break;
                 }
                 struct sp_port_config* config;
@@ -856,7 +859,7 @@ void tty_wait_for_device(void)
     int    timeout;
     static char input_char;
     static bool first = true;
-    static int last_errno = 0;
+    static DWORD last_errno = 0;
 
     /* Loop until device pops up */
     while (true)
@@ -874,7 +877,7 @@ void tty_wait_for_device(void)
             else
             {
                 /* Wait up to 1 second for input */
-                timeout = 1;
+                timeout = 1000;
             }
 
             pollfd_t pollfd;
@@ -902,7 +905,7 @@ void tty_wait_for_device(void)
             }
             else if (status == -1)
             {
-                tio_error_printf("poll() failed (%s)", strerror(errno));
+                tio_error_printf("poll() failed (%s)", GetErrorMessage(GetLastError()));
                 exit(EXIT_FAILURE);
             }
         }
@@ -921,11 +924,11 @@ void tty_wait_for_device(void)
             }
         }
 
-        if (last_errno != errno)
+        if (last_errno != GetLastError())
         {
-            tio_warning_printf("Could not open tty device (%s)", strerror(errno));
+            tio_warning_printf("Could not open tty device (%s)", GetErrorMessage(GetLastError()));
             tio_printf("Waiting for tty device..");
-            last_errno = errno;
+            last_errno = GetLastError();
         }
 
         if (!interactive_mode)
@@ -1052,7 +1055,7 @@ int tty_connect(void)
     /* Save current port settings */
     if (sp_get_config(hPort, cfgPort_old) < 0)
     {
-        tio_error_printf_silent("Could not get port settings (%s)", strerror(errno));
+        tio_error_printf_silent("Could not get port settings (%s)", GetErrorMessage(GetLastError()));
         goto error_tcgetattr;
     }
 
@@ -1066,7 +1069,7 @@ int tty_connect(void)
     /* Activate new port settings */
     if (sp_set_config(hPort,cfgPort) < 0)
     {
-        tio_error_printf_silent("Could not apply port settings (%s)", strerror(errno));
+        tio_error_printf_silent("Could not apply port settings (%s)", GetErrorMessage(GetLastError()));
         goto error_tcsetattr;
     }
 
@@ -1103,7 +1106,7 @@ int tty_connect(void)
             {
                 /* Input from tty device ready */
                 ssize_t bytes_read = sp_nonblocking_read(hPort, input_buffer, BUFSIZ);
-                if (bytes_read <= 0)
+                if (bytes_read < 0)
                 {
                     /* Error reading - device is likely unplugged */
                     tio_error_printf_silent("Could not read from tty device");
@@ -1196,7 +1199,7 @@ int tty_connect(void)
                 ssize_t bytes_read = RING_Read(ring, input_buffer, BUFSIZ);
                 if (bytes_read == 0)
                 {
-                    tio_error_printf_silent("Could not read from stdin (%s)", strerror(errno));
+                    tio_error_printf_silent("Could not read from stdin");
                     goto error_read;
                 }
 
@@ -1253,21 +1256,9 @@ int tty_connect(void)
         }
         else if (status == -1)
         {
-#if defined(__CYGWIN__)
-            // Happens when port unpluged
-            if (errno == EACCES)
-            {
-                goto error_read;
-            }
-#elif defined(__APPLE__)
-            if (errno == EBADF)
-            {
-                break; // tty_disconnect() will be naturally triggered by atexit()
-            }
-#else
-            tio_error_printf("poll() failed (%s)", strerror(errno));
+
+            tio_error_printf("poll() failed (%s)", GetErrorMessage(GetLastError()));
             exit(EXIT_FAILURE);
-#endif
         }
         else
         {

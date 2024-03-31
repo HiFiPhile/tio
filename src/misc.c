@@ -69,3 +69,18 @@ int ctrl_key_code(unsigned char key)
 
     return -1;
 }
+
+LPSTR GetErrorMessage(DWORD dwErrorCode)
+{
+    static TCHAR Buf[255];
+    ZeroMemory(Buf, sizeof(Buf));
+
+    FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
+                    NULL,  /* (not used with FORMAT_MESSAGE_FROM_SYSTEM) */
+                    dwErrorCode,
+                    MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                    Buf,
+                    sizeof(Buf) - 1,
+                    NULL);
+    return Buf;
+}
