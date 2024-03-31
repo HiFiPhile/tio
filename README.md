@@ -3,10 +3,14 @@
 
 # tio - a simple serial device I/O tool
 
-[![](https://img.shields.io/circleci/build/github/tio/tio)](https://circleci.com/github/tio/tio/tree/master)
-[![](https://img.shields.io/github/v/release/tio/tio?sort=semver)](https://github.com/tio/tio/releases)
-[![](https://img.shields.io/repology/repositories/tio)](https://repology.org/project/tio/versions)
-<!-- [![](https://img.shields.io/tokei/lines/github/tio/tio)](https://github.com/tio/tio) -->
+This is a hacky port to compile tio as native Win32 program, to get around of
+Cygwin serial port quirks and dependency issue.
+
+- Basic I/O works
+- RS-485 mode removed due to incompatibility
+- Regex in config file removed due to Windows COM port naming
+- Socket is WIP
+- Not all configurations are tested
 
 ## 1. Introduction
 
