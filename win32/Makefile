@@ -38,6 +38,7 @@ APPLICATION_FILES= \
     ../src/timestamp.c \
     ../src/alert.c \
     ../src/xymodem.c \
+    ../src/script.c \
     libinih/ini.c \
 	posix_compat/serialport.c \
 	posix_compat/semaphore.c \
@@ -53,7 +54,7 @@ COMPILER_FLAGS ?= \
 	-g \
 
 ifeq ($(MSYSTEM),MINGW64)
-	LINKER_FLAGS += -Wl,-Bstatic -lws2_32
+	LINKER_FLAGS += -Wl,-Bstatic -lws2_32 -llua
 endif
 
 LINKER_FLAGS +=  \

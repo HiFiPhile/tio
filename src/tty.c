@@ -51,6 +51,7 @@
 #include "cpoll.h"
 #include "ring.h"
 #include "enumport.h"
+#include "script.h"
 
 #define LINE_SIZE_MAX 1000
 
@@ -73,6 +74,7 @@
 #define KEY_M 0x6D
 #define KEY_P 0x70
 #define KEY_Q 0x71
+#define KEY_R 0x72
 #define KEY_S 0x73
 #define KEY_T 0x74
 #define KEY_U 0x55
@@ -81,15 +83,12 @@
 #define KEY_Y 0x79
 #define KEY_Z 0x7a
 
-#define TIOCM_DTR 0x01
-#define TIOCM_RTS 0x02
-
-enum line_mode_t
+typedef enum
 {
     LINE_OFF,
     LINE_TOGGLE,
     LINE_PULSE
-};
+} tty_line_mode_t;
 
 const char random_array[] =
 {
@@ -387,9 +386,25 @@ static void output_hex(char c)
     }
 }
 
-static void toggle_line(const char *line_name, int mask, enum line_mode_t line_mode)
+void tty_line_set(int mask, int value)
 {
-    // Toggle line
+    struct sp_port_config* config;
+    sp_new_config(&config);
+    sp_get_config(hPort, config);
+    if(mask & TIOCM_DTR) {
+        sp_set_config_dtr(config, (value & TIOCM_DTR) ? SP_DTR_ON : SP_DTR_OFF);
+        tio_printf("Setting DTR to %s", (value & TIOCM_DTR) ? "LOW" : "HIGH");
+    }
+    if(mask & TIOCM_RTS) {
+        sp_set_config_rts(config, (value & TIOCM_RTS) ? SP_RTS_ON : SP_RTS_OFF);
+        tio_printf("Setting RTS to %s", (value & TIOCM_RTS) ? "LOW" : "HIGH");
+    }
+    sp_set_config(hPort, config);
+    sp_free_config(config);
+}
+
+void tty_line_toggle(int mask)
+{
     struct sp_port_config* config;
     sp_new_config(&config);
     sp_get_config(hPort, config);
@@ -406,37 +421,37 @@ static void toggle_line(const char *line_name, int mask, enum line_mode_t line_m
         tio_printf("Setting RTS to %s", rts == SP_RTS_OFF ? "LOW" : "HIGH");
     }
     sp_set_config(hPort, config);
-    if (line_mode == LINE_PULSE)
-    {
-        int duration = 0;
-        switch (mask)
-        {
-            case TIOCM_DTR:
-                duration = option.dtr_pulse_duration;
-                break;
-            case TIOCM_RTS:
-                duration = option.rts_pulse_duration;
-                break;
-            default:
-                duration = option.pulse_duration;
-                break;
-        }
-        if (duration > 0)
-        {
-            tio_printf("Waiting %d ms", duration);
-            delay(duration);
-        }
-        if(mask & TIOCM_DTR) {
-            sp_set_config_dtr(config, dtr);
-            tio_printf("Setting DTR to %s", dtr == SP_DTR_OFF ? "HIGH" : "LOW");
-        }
-        if(mask & TIOCM_RTS) {
-            sp_set_config_rts(config, rts);
-            tio_printf("Setting RTS to %s", rts == SP_RTS_OFF ? "HIGH" : "LOW");
-        }
-        sp_set_config(hPort, config);
-    }
     sp_free_config(config);
+}
+
+static void tty_line_pulse(int mask, unsigned int duration)
+{
+    tty_line_toggle(mask);
+
+    if (duration > 0)
+    {
+        tio_printf("Waiting %d ms", duration);
+        delay(duration);
+    }
+
+    tty_line_toggle(mask);
+}
+
+static void tty_line_poke(int mask, tty_line_mode_t mode, unsigned int duration)
+{
+    switch (mode)
+    {
+        case LINE_TOGGLE:
+            tty_line_toggle(mask);
+            break;
+
+        case LINE_PULSE:
+            tty_line_pulse(mask, duration);
+            break;
+
+        case LINE_OFF:
+            break;
+    }
 }
 
 static int tio_readln(void)
@@ -470,7 +485,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 {
     char unused_char;
     bool unused_bool;
-    static enum line_mode_t line_mode = LINE_OFF;
+    static tty_line_mode_t line_mode = LINE_OFF;
     static char previous_char = 0;
 
     /* Ignore unused arguments */
@@ -484,20 +499,20 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
         forward = &unused_bool;
     }
 
+    // Handle tty line toggle and pulse action
     if (line_mode)
     {
-        // Handle line toggle number action
         *forward = false;
         switch (input_char)
         {
             case KEY_0:
-                toggle_line("DTR", TIOCM_DTR, line_mode);
+                tty_line_poke(TIOCM_DTR, line_mode, option.dtr_pulse_duration);
                 break;
             case KEY_1:
-                toggle_line("RTS", TIOCM_RTS, line_mode);
+                tty_line_poke(TIOCM_RTS, line_mode, option.rts_pulse_duration);
                 break;
             case KEY_2:
-                toggle_line("DTR+RTS", TIOCM_DTR + TIOCM_RTS, line_mode);
+                tty_line_poke(TIOCM_DTR | TIOCM_RTS, line_mode, option.pulse_duration);
                 break;
             default:
                 tio_warning_printf("Invalid line number");
@@ -542,6 +557,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf(" ctrl-%c m       Toggle MSB to LSB bit order", option.prefix_key);
                 tio_printf(" ctrl-%c p       Pulse serial port line", option.prefix_key);
                 tio_printf(" ctrl-%c q       Quit", option.prefix_key);
+                tio_printf(" ctrl-%c r       Run script", option.prefix_key);
                 tio_printf(" ctrl-%c s       Show statistics", option.prefix_key);
                 tio_printf(" ctrl-%c t       Toggle line timestamp mode", option.prefix_key);
                 tio_printf(" ctrl-%c U       Toggle conversion to uppercase on output", option.prefix_key);
@@ -673,6 +689,11 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
             case KEY_Q:
                 /* Exit upon ctrl-t q sequence */
                 exit(EXIT_SUCCESS);
+
+            case KEY_R:
+                /* Run script */
+                script_run();
+                break;
 
             case KEY_S:
                 /* Show tx/rx statistics upon ctrl-t s sequence */
@@ -1091,6 +1112,17 @@ int tty_connect(void)
         sp_free_event_set(sp_event);
     sp_new_event_set(&sp_event);
     sp_add_port_events(sp_event, hPort, SP_EVENT_RX_READY);
+
+    /* Manage script activation */
+    if (option.script_run != SCRIPT_RUN_NEVER)
+    {
+        script_run();
+
+        if (option.script_run == SCRIPT_RUN_ONCE)
+        {
+            option.script_run = SCRIPT_RUN_NEVER;
+        }
+    }
 
     /* Input loop */
     while (true)

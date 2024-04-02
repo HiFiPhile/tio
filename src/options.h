@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <sys/param.h>
+#include "script.h"
 #include "timestamp.h"
 #include "alert.h"
 
@@ -60,6 +61,9 @@ struct option_t
     bool mute;
     enum alert_t alert;
     bool complete_sub_configs;
+    const char *script;
+    const char *script_filename;
+    enum script_run_t script_run;
 };
 
 extern struct option_t option;
@@ -69,3 +73,4 @@ void options_parse(int argc, char *argv[]);
 void options_parse_final(int argc, char *argv[]);
 
 void line_pulse_duration_option_parse(const char *arg);
+enum script_run_t script_run_option_parse(const char *arg);
