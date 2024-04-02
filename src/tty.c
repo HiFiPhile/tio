@@ -135,6 +135,8 @@ static pthread_t thread;
 static RING_Handle_t ring;
 static pthread_mutex_t mutex_input_ready = PTHREAD_MUTEX_INITIALIZER;
 static char line[LINE_SIZE_MAX];
+static HANDLE ev_exit;
+
 
 static void optional_local_echo(char c)
 {
@@ -283,6 +285,7 @@ void *tty_stdin_input_thread(void *arg)
         }
         else if (byte_count == 0)
         {
+            SetEvent(ev_exit);
             pthread_exit(0);
         }
 
@@ -315,6 +318,7 @@ void *tty_stdin_input_thread(void *arg)
                     switch (input_char)
                     {
                         case KEY_Q:
+                            SetEvent(ev_exit);
                             exit(EXIT_SUCCESS);
                             break;
                         case KEY_SHIFT_F:
@@ -333,12 +337,15 @@ void *tty_stdin_input_thread(void *arg)
         RING_Write_Blocking(ring, input_buffer, byte_count);
     }
 
+    SetEvent(ev_exit);
     pthread_exit(0);
 }
 
 void tty_input_thread_create(void)
 {
     pthread_mutex_lock(&mutex_input_ready);
+
+    ev_exit = CreateEventA(NULL, TRUE, FALSE, NULL);
 
     if (pthread_create(&thread, NULL, tty_stdin_input_thread, NULL) != 0) {
         tio_error_printf("pthread_create() error");
@@ -880,16 +887,18 @@ void tty_wait_for_device(void)
                 timeout = 1000;
             }
 
-            pollfd_t pollfd;
-            pollfd.fd = RING_GetWaitable(ring, RING_Available);
-            pollfd.events = POLL_IN;
+            pollfd_t pollfd[2];
+            pollfd[0].fd = RING_GetWaitable(ring, RING_Available);
+            pollfd[0].events = POLL_IN;
+            pollfd[1].fd = ev_exit;
+            pollfd[1].events = POLL_IN;
 
             /* Block until input becomes available or timeout */
-            status = poll(&pollfd, 1, timeout);
+            status = poll(pollfd, 2, timeout);
             if (status > 0)
             {
                 /* Input from stdin ready */
-                if (pollfd.revents & POLL_IN)
+                if (pollfd[0].revents & POLL_IN)
                 {
                     /* Read one character */
                     status = RING_Read(ring, &input_char, 1);
@@ -901,6 +910,11 @@ void tty_wait_for_device(void)
 
                     /* Handle commands */
                     handle_command_sequence(input_char, NULL, NULL);
+                }
+                /* Exit called */
+                else if (pollfd[1].revents == POLL_IN)
+                {
+                    exit(EXIT_SUCCESS);
                 }
             }
             else if (status == -1)
@@ -1081,28 +1095,35 @@ int tty_connect(void)
     /* Input loop */
     while (true)
     {
-        pollfd_t pollfd[2];
+        pollfd_t pollfd[3];
         if (!ignore_stdin)
         {
-            pollfd[1].fd = RING_GetWaitable(ring, RING_Available);
-            pollfd[1].events = POLL_IN;
+            pollfd[2].fd = RING_GetWaitable(ring, RING_Available);
+            pollfd[2].events = POLL_IN;
         }
         else
         {
-            pollfd[1].fd = 0;
-            pollfd[1].events = 0;
-            pollfd[1].revents = 0;
+            pollfd[2].fd = 0;
+            pollfd[2].events = 0;
+            pollfd[2].revents = 0;
         }
         pollfd[0].fd = ((HANDLE*)sp_event->handles)[0];
         pollfd[0].events = POLL_IN;
+        pollfd[1].fd = ev_exit;
+        pollfd[1].events = POLL_IN;
 
         /* Block until input becomes available */
-        status = poll(pollfd, ignore_stdin ? 1 : 2,
+        status = poll(pollfd, ignore_stdin ? 2 : 3,
             (option.response_wait) && (option.response_timeout != 0) ? option.response_timeout : -1);
         if (status > 0)
         {
             bool forward = false;
-            if (pollfd[0].revents == POLL_IN)
+            if (pollfd[1].revents == POLL_IN)
+            {
+                /* Exit called */
+                exit(EXIT_SUCCESS);
+            }
+            else if (pollfd[0].revents == POLL_IN)
             {
                 /* Input from tty device ready */
                 ssize_t bytes_read = sp_nonblocking_read(hPort, input_buffer, BUFSIZ);
@@ -1193,7 +1214,7 @@ int tty_connect(void)
                     }
                 }
             }
-            else if (pollfd[1].revents == POLL_IN)
+            else if (pollfd[2].revents == POLL_IN)
             {
                 /* Input from stdin ready */
                 ssize_t bytes_read = RING_Read(ring, input_buffer, BUFSIZ);
