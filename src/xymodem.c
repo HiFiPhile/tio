@@ -91,7 +91,7 @@ static int xmodem_1k(struct sp_port *port, const void *data, size_t len, int seq
             perror("Read sync from serial failed");
             return ERR;
         }
-        else if(ret == 1) {
+        else if(ret == 0) {
             if (resp == 'C') break;
             if (resp == CAN) return ERR;
         }
@@ -208,7 +208,7 @@ static int xmodem(struct sp_port *port, const void *data, size_t len)
             perror("Read sync from serial failed");
             return ERR;
         }
-        else if(ret == 1) {
+        else if(ret == 0) {
             if (resp == 'C') break;
             if (resp == CAN) return ERR;
         }
