@@ -97,6 +97,9 @@ static int xmodem_1k(struct sp_port *port, const void *data, size_t len, int seq
         }
     }
 
+    /* Clear all 'C' */
+    sp_flush(port, SP_BUF_BOTH);
+
     /* Always work with 1K packets */
     packet.seq  = seq;
     packet.type = STX;
@@ -213,6 +216,9 @@ static int xmodem(struct sp_port *port, const void *data, size_t len)
             if (resp == CAN) return ERR;
         }
     }
+
+    /* Clear all 'C' */
+    sp_flush(port, SP_BUF_BOTH);
 
     /* Always work with 128b packets */
     packet.seq  = 1;
