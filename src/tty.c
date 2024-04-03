@@ -261,7 +261,11 @@ void *tty_stdin_input_thread(void *arg)
 {
     UNUSED(arg);
     char input_buffer[BUFSIZ];
-    ssize_t byte_count;
+    DWORD byte_count;
+    HANDLE hInput;
+
+    // Get STDIN handle
+    hInput = GetStdHandle(STD_INPUT_HANDLE);
 
     // Create FIFO
     ring = RING_Init(0x8000);
@@ -273,22 +277,7 @@ void *tty_stdin_input_thread(void *arg)
     while (1)
     {
         /* Input from stdin ready */
-        byte_count = read(STDIN_FILENO, input_buffer, BUFSIZ);
-        if (byte_count < 0)
-        {
-            /* No error actually occurred */
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            tio_warning_printf("Could not read from stdin (%s)", strerror(errno));
-        }
-        else if (byte_count == 0)
-        {
-            SetEvent(ev_exit);
-            pthread_exit(0);
-        }
-
+        ReadConsoleA(hInput, input_buffer, BUFSIZ, &byte_count, NULL);
         if (interactive_mode)
         {
             static char previous_char = 0;
@@ -788,7 +777,7 @@ void stdin_configure(void)
     mode &=~ENABLE_ECHO_INPUT;
     mode &=~ENABLE_LINE_INPUT;
     mode &=~ENABLE_PROCESSED_INPUT;
-
+    mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
     // /* Control characters */
     // stdin_new.c_cc[VTIME] = 0; /* Inter-character timer unused */
     // stdin_new.c_cc[VMIN]  = 1; /* Blocking read until 1 character received */
@@ -814,7 +803,11 @@ void stdout_configure(void)
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode = 0;
     GetConsoleMode(hConsole, &mode); //
-    SetConsoleMode(hConsole, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    mode |= ENABLE_PROCESSED_OUTPUT;
+    mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    SetConsoleMode(hConsole, mode);
+
+    SetConsoleOutputCP(CP_UTF8);
 
     /* At start use normal print function */
     print = print_normal;
