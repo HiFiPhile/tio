@@ -20,6 +20,7 @@
 #include "misc.h"
 #include "mmap.h"
 
+#define SOH 0x01
 #define STX 0x02
 #define ACK 0x06
 #define NAK 0x15
@@ -33,11 +34,20 @@
 #define min(a, b)       ((a) < (b) ? (a) : (b))
 #endif
 
-struct xpacket {
+struct xpacket_1k {
     uint8_t  type;
     uint8_t  seq;
     uint8_t  nseq;
     uint8_t  data[1024];
+    uint8_t  crc_hi;
+    uint8_t  crc_lo;
+} __attribute__((packed));
+
+struct xpacket {
+    uint8_t  type;
+    uint8_t  seq;
+    uint8_t  nseq;
+    uint8_t  data[128];
     uint8_t  crc_hi;
     uint8_t  crc_lo;
 } __attribute__((packed));
@@ -62,9 +72,9 @@ stpcpy (char *dest, const char *src)
   return memcpy (dest, src, len + 1) + len;
 }
 
-static int xmodem(struct sp_port *port, const void *data, size_t len, int seq)
+static int xmodem_1k(struct sp_port *port, const void *data, size_t len, int seq)
 {
-    struct xpacket  packet;
+    struct xpacket_1k  packet;
     const uint8_t  *buf = data;
     char            resp = 0;
     int             crc;
@@ -119,6 +129,9 @@ static int xmodem(struct sp_port *port, const void *data, size_t len, int seq)
             from += ret;
             sz   -= ret;
         }
+
+        /* Clear response */
+        resp = 0;
 
         /* 'lrzsz' does not ACK ymodem's fin packet */
         if (seq == 0 && packet.data[0] == 0) resp = ACK;
@@ -176,6 +189,121 @@ static int xmodem(struct sp_port *port, const void *data, size_t len, int seq)
     return 0; /* not reached */
 }
 
+static int xmodem(struct sp_port *port, const void *data, size_t len)
+{
+    struct xpacket  packet;
+    const uint8_t  *buf = data;
+    char            resp = 0;
+    int             crc;
+    enum sp_return ret;
+
+    /* Drain pending characters from serial line. Insist on the
+     * last drained character being 'C'.
+     */
+    while(1) {
+        if (key_hit)
+            return -1;
+        ret = sp_blocking_read(port, &resp, 1, 50);
+        if(ret < 0) {
+            perror("Read sync from serial failed");
+            return ERR;
+        }
+        else if(ret == 1) {
+            if (resp == 'C') break;
+            if (resp == CAN) return ERR;
+        }
+    }
+
+    /* Always work with 128b packets */
+    packet.seq  = 1;
+    packet.type = SOH;
+
+    while (len) {
+        size_t  sz, z = 0;
+        char   *from, status;
+
+        /* Build next packet, pad with 0 to full seq */
+        z = min(len, sizeof(packet.data));
+        memcpy(packet.data, buf, z);
+        memset(packet.data + z, 0, sizeof(packet.data) - z);
+        crc = crc16(packet.data, sizeof(packet.data));
+        packet.crc_hi = crc >> 8;
+        packet.crc_lo = crc;
+        packet.nseq = 0xff - packet.seq;
+
+        /* Send packet */
+        from = (char *) &packet;
+        sz =  sizeof(packet);
+        while (sz) {
+            if (key_hit)
+                return ERR;
+            ret = sp_blocking_write(port, from, sz, 0);
+            if(ret < 0) {
+                perror("Write packet to serial failed");
+                return ERR;
+            }
+
+            sp_drain(port);
+            from += ret;
+            sz   -= ret;
+        }
+
+        /* Clear response */
+        resp = 0;
+
+        /* Read receiver response, timeout 1 s */
+        for(int n=0; n < 20; n++) {
+            if (key_hit)
+                return ERR;
+            ret = sp_blocking_read(port, &resp, 1, 50);
+            if(ret < 0) {
+                perror("Read sync from serial failed");
+                return ERR;
+            } else if(ret == 1) break;
+        }
+
+        /* Update "progress bar" */
+        switch (resp) {
+        case NAK: status = 'N'; break;
+        case ACK: status = '.'; break;
+        case 'C': status = 'C'; break;
+        case CAN: status = '!'; return ERR;
+        default:  status = '?';
+        }
+        write(STDOUT_FILENO, &status, 1);
+
+        /* Move to next block after ACK */
+        if (resp == ACK) {
+            packet.seq++;
+            len -= z;
+            buf += z;
+        }
+    }
+
+    /* Send EOT at 1 Hz until ACK or CAN received */
+    while (1) {
+        if (key_hit)
+            return ERR;
+        ret = sp_blocking_write(port, EOT, 1, 0);
+        if(ret < 0) {
+            perror("Write packet to serial failed");
+            return ERR;
+        }
+        write(STDOUT_FILENO, "|", 1);
+        /* 1 s timeout*/
+        ret = sp_blocking_read(port, &resp, 1, 1000);
+        if(ret < 0) {
+            perror("Read sync from serial failed");
+            return ERR;
+        } else if (ret == 0) continue;
+        if (resp == ACK || resp == CAN) {
+            write(STDOUT_FILENO, "\r\n", 2);
+            return (resp == ACK) ? OK : ERR;
+        }
+    }
+    return 0; /* not reached */
+}
+
 int xymodem_send(struct sp_port *port, const char *filename, char mode)
 {
     size_t         len;
@@ -201,7 +329,10 @@ int xymodem_send(struct sp_port *port, const char *filename, char mode)
     /* Do transfer */
     key_hit = 0;
     if (mode == 'x') {
-        rc = xmodem(port, buf, len, 1);
+        rc = xmodem_1k(port, buf, len, 1);
+    }
+    else if (mode == 'X') {
+        rc = xmodem(port, buf, len);
     }
     else {
         /* Ymodem: hdr + file + fin */
@@ -213,9 +344,9 @@ int xymodem_send(struct sp_port *port, const char *filename, char mode)
             p  = stpcpy(hdr, filename) + 1;
             p += sprintf(p, "%lld %llo %o", len, stat.st_mtime, stat.st_mode);
 
-            if (xmodem(port, hdr, p - hdr, 0) < 0) break; /* hdr with metadata */
-            if (xmodem(port, buf, len,     1) < 0) break; /* xmodem file */
-            if (xmodem(port, "",  1,       0) < 0) break; /* empty hdr = fin */
+            if (xmodem_1k(port, hdr, p - hdr, 0) < 0) break; /* hdr with metadata */
+            if (xmodem_1k(port, buf, len,     1) < 0) break; /* xmodem file */
+            if (xmodem_1k(port, "",  1,       0) < 0) break; /* empty hdr = fin */
             rc = 0;                               break;
         }
     }
