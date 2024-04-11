@@ -52,6 +52,7 @@
 #include "ring.h"
 #include "enumport.h"
 #include "script.h"
+#include "xymodem.h"
 
 #define LINE_SIZE_MAX 1000
 
@@ -68,10 +69,11 @@
 #define KEY_F 0x66
 #define KEY_SHIFT_F 0x46
 #define KEY_G 0x67
-#define KEY_H 0x68
+#define KEY_I 0x69
 #define KEY_L 0x6C
 #define KEY_SHIFT_L 0x4C
 #define KEY_M 0x6D
+#define KEY_O 0x6F
 #define KEY_P 0x70
 #define KEY_Q 0x71
 #define KEY_R 0x72
@@ -86,10 +88,24 @@
 
 typedef enum
 {
-    LINE_OFF,
     LINE_TOGGLE,
     LINE_PULSE
 } tty_line_mode_t;
+
+typedef enum
+{
+    SUBCOMMAND_NONE,
+    SUBCOMMAND_LINE_TOGGLE,
+    SUBCOMMAND_LINE_PULSE,
+    SUBCOMMAND_XMODEM,
+} sub_command_t;
+
+typedef struct
+{
+    int mask;
+    bool value;
+    bool reserved;
+} tty_line_config_t;
 
 const char random_array[] =
 {
@@ -125,6 +141,7 @@ static bool map_o_cr_nl = false;
 static bool map_o_nl_crnl = false;
 static bool map_o_del_bs = false;
 static bool map_o_ltu = false;
+static bool map_o_nulbrk = false;
 static bool map_o_msblsb = false;
 static char hex_chars[2];
 static unsigned char hex_char_index = 0;
@@ -144,11 +161,15 @@ static void optional_local_echo(char c)
     {
         return;
     }
+
     print(c);
+
     if (option.log)
     {
         log_putc(c);
     }
+
+    print_tainted_set();
 }
 
 inline static bool is_valid_hex(char c)
@@ -347,22 +368,28 @@ void tty_input_thread_wait_ready(void)
     pthread_mutex_lock(&mutex_input_ready);
 }
 
-static void output_hex(char c)
+static void handle_hex_prompt(char c)
 {
     hex_chars[hex_char_index++] = c;
 
     printf("%c", c);
+    print_tainted_set();
 
     if (hex_char_index == 2)
     {
         usleep(100*1000);
+        if (option.local_echo == false)
+        {
         printf("\b \b");
         printf("\b \b");
+        }
+        else
+        {
+            printf(" ");
+        }
 
         unsigned char hex_value = char_to_nibble(hex_chars[0]) << 4 | (char_to_nibble(hex_chars[1]) & 0x0F);
         hex_char_index = 0;
-
-        optional_local_echo(hex_value);
 
         ssize_t status = tty_write(&hex_value, 1);
         if (status < 0)
@@ -438,9 +465,6 @@ static void tty_line_poke(int mask, tty_line_mode_t mode, unsigned int duration)
         case LINE_PULSE:
             tty_line_pulse(mask, duration);
             break;
-
-        case LINE_OFF:
-            break;
     }
 }
 
@@ -471,11 +495,29 @@ static int tio_readln(void)
     return (p - line);
 }
 
+void tty_output_mode_set(output_mode_t mode)
+{
+    switch (mode)
+    {
+        case OUTPUT_MODE_NORMAL:
+            print = print_normal;
+            break;
+
+        case OUTPUT_MODE_HEX:
+            print = print_hex;
+            break;
+
+        case OUTPUT_MODE_END:
+            break;
+    }
+}
+
 void handle_command_sequence(char input_char, char *output_char, bool *forward)
 {
     char unused_char;
     bool unused_bool;
-    static tty_line_mode_t line_mode = LINE_OFF;
+    static tty_line_mode_t line_mode;
+    static sub_command_t sub_command = SUBCOMMAND_NONE;
     static char previous_char = 0;
 
     /* Ignore unused arguments */
@@ -490,9 +532,17 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
     }
 
     // Handle tty line toggle and pulse action
-    if (line_mode)
+    if (sub_command)
     {
         *forward = false;
+
+        switch (sub_command)
+        {
+            case SUBCOMMAND_NONE:
+                break;
+
+            case SUBCOMMAND_LINE_TOGGLE:
+            case SUBCOMMAND_LINE_PULSE:
         switch (input_char)
         {
             case KEY_0:
@@ -508,9 +558,37 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_warning_printf("Invalid line number");
                 break;
         }
+                break;
 
-        line_mode = LINE_OFF;
+            case SUBCOMMAND_XMODEM:
+                switch (input_char)
+                {
+                    case KEY_0:
+                        tio_printf("Send file with XMODEM-1K");
+                        tio_printf_raw("Enter file name: ");
+                        if (tio_readln())
+                        {
+                            tio_printf("Sending file '%s'  ", line);
+                            tio_printf("Press any key to abort transfer");
+                            tio_printf("%s", xymodem_send(hPort, line, input_char) < 0 ? "Aborted" : "Done");
+                        }
+                        break;
 
+                    case KEY_1:
+                        tio_printf("Send file with XMODEM-CRC");
+                        tio_printf_raw("Enter file name: ");
+                        if (tio_readln())
+                        {
+                            tio_printf("Sending file '%s'  ", line);
+                            tio_printf("Press any key to abort transfer");
+                            tio_printf("%s", xymodem_send(hPort, line, input_char) < 0 ? "Aborted" : "Done");
+                        }
+                        break;
+                }
+                break;
+        }
+
+        sub_command = SUBCOMMAND_NONE;
         return;
     }
 
@@ -530,6 +608,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
             return;
         }
 
+        // Handle commands
         switch (input_char)
         {
             case KEY_QUESTION:
@@ -541,10 +620,11 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf(" ctrl-%c f       Toggle log to file", option.prefix_key);
                 tio_printf(" ctrl-%c F       Flush data I/O buffers", option.prefix_key);
                 tio_printf(" ctrl-%c g       Toggle serial port line", option.prefix_key);
-                tio_printf(" ctrl-%c h       Toggle hexadecimal mode", option.prefix_key);
+                tio_printf(" ctrl-%c i       Toggle input mode", option.prefix_key);
                 tio_printf(" ctrl-%c l       Clear screen", option.prefix_key);
                 tio_printf(" ctrl-%c L       Show line states", option.prefix_key);
                 tio_printf(" ctrl-%c m       Toggle MSB to LSB bit order", option.prefix_key);
+                tio_printf(" ctrl-%c o       Toggle output mode", option.prefix_key);
                 tio_printf(" ctrl-%c p       Pulse serial port line", option.prefix_key);
                 tio_printf(" ctrl-%c q       Quit", option.prefix_key);
                 tio_printf(" ctrl-%c r       Run script", option.prefix_key);
@@ -552,7 +632,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf(" ctrl-%c t       Toggle line timestamp mode", option.prefix_key);
                 tio_printf(" ctrl-%c U       Toggle conversion to uppercase on output", option.prefix_key);
                 tio_printf(" ctrl-%c v       Show version", option.prefix_key);
-                tio_printf(" ctrl-%c x       Send file via Xmodem-1K", option.prefix_key);
+                tio_printf(" ctrl-%c x       Send file via Xmodem", option.prefix_key);
                 tio_printf(" ctrl-%c X       Send file via Xmodem-CRC", option.prefix_key);
                 tio_printf(" ctrl-%c y       Send file via Ymodem", option.prefix_key);
                 tio_printf(" ctrl-%c ctrl-%c Send ctrl-%c character", option.prefix_key, option.prefix_key, option.prefix_key);
@@ -613,7 +693,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf(" RTS        (1)");
                 tio_printf(" DTR+RTS    (2)");
                 // Process next input character as part of the line toggle step
-                line_mode = LINE_TOGGLE;
+                sub_command = SUBCOMMAND_LINE_TOGGLE;
                 break;
 
             case KEY_P:
@@ -622,7 +702,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf(" RTS        (1)");
                 tio_printf(" DTR+RTS    (2)");
                 // Process next input character as part of the line pulse step
-                line_mode = LINE_PULSE;
+                sub_command = SUBCOMMAND_LINE_PULSE;
                 break;
 
             case KEY_B:
@@ -642,19 +722,42 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf("Switched local echo %s", option.local_echo ? "on" : "off");
                 break;
 
-            case KEY_H:
+            case KEY_I:
+                option.input_mode += 1;
+                switch (option.input_mode)
+                {
+                    case INPUT_MODE_NORMAL:
+                        break;
                 /* Toggle hexadecimal printing mode */
-                if (!option.hex_mode)
-                {
-                    print = print_hex;
-                    option.hex_mode = true;
-                    tio_printf("Switched to hexadecimal mode");
+                    case INPUT_MODE_HEX:
+                        option.input_mode = INPUT_MODE_HEX;
+                        tio_printf("Switched to hex input mode");
+                        break;
+
+                    case INPUT_MODE_END:
+                        option.input_mode = INPUT_MODE_NORMAL;
+                        tio_printf("Switched to normal input mode");
+                        break;
                 }
-                else
+                break;
+
+            case KEY_O:
+                option.output_mode += 1;
+                switch (option.output_mode)
                 {
-                    print = print_normal;
-                    option.hex_mode = false;
-                    tio_printf("Switched to normal mode");
+                    case OUTPUT_MODE_NORMAL:
+                        break;
+
+                    case OUTPUT_MODE_HEX:
+                        tty_output_mode_set(OUTPUT_MODE_HEX);
+                        tio_printf("Switched to hex output mode");
+                        break;
+
+                    case OUTPUT_MODE_END:
+                        option.output_mode = OUTPUT_MODE_NORMAL;
+                        tty_output_mode_set(OUTPUT_MODE_NORMAL);
+                        tio_printf("Switched to normal output mode");
+                        break;
                 }
                 break;
 
@@ -727,9 +830,15 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_X:
+                tio_printf("Please enter which X modem protocol to use:");
+                tio_printf(" (0) XMODEM-1K");
+                tio_printf(" (1) XMODEM-CRC");
+                // Process next input character as sub command
+                sub_command = SUBCOMMAND_XMODEM;
+                break;
+
             case KEY_Y:
-            case KEY_SHIFT_X:
-                tio_printf("Send file with %s", input_char == KEY_X ?  "XMODEM-1K" : (input_char == KEY_Y ? "YMODEM" : "XMODEM-CRC"));
+                tio_printf("Send file with YMODEM");
                 tio_printf_raw("Enter file name: ");
                 if (tio_readln()) {
                     tio_printf("Sending file '%s'  ", line);
@@ -875,6 +984,76 @@ void tty_configure(void)
         tio_error_printf("Invalid parity");
         exit(EXIT_FAILURE);
     }
+
+    /* Configure any specified input or output mappings */
+    char * buffer = strdup(option.map);
+    bool token_found = true;
+    char *token = NULL;
+    while (token_found == true)
+    {
+        if (token == NULL)
+        {
+            token = strtok(buffer,",");
+        }
+        else
+        {
+            token = strtok(NULL, ",");
+        }
+
+        if (token != NULL)
+        {
+            if (strcmp(token,"INLCR") == 0)
+            {
+                map_i_nl_cr = true;
+            }
+            else if (strcmp(token,"IGNCR") == 0)
+            {
+                map_ign_cr = true;
+            }
+            else if (strcmp(token,"ICRNL") == 0)
+            {
+                map_i_cr_nl = true;
+            }
+            else if (strcmp(token,"OCRNL") == 0)
+            {
+                map_o_cr_nl = true;
+            }
+            else if (strcmp(token,"ODELBS") == 0)
+            {
+                map_o_del_bs = true;
+            }
+            else if (strcmp(token,"IFFESCC") == 0)
+            {
+                map_i_ff_escc = true;
+            }
+            else if (strcmp(token,"INLCRNL") == 0)
+            {
+                map_i_nl_crnl = true;
+            }
+            else if (strcmp(token, "ONLCRNL") == 0)
+            {
+                map_o_nl_crnl = true;
+            }
+            else if (strcmp(token, "OLTU") == 0)
+            {
+                map_o_ltu = true;
+            }
+            else if (strcmp(token, "MSB2LSB") == 0)
+            {
+                map_o_msblsb = true;
+            }
+            else
+            {
+                printf("Error: Unknown mapping flag %s\n", token);
+                exit(EXIT_FAILURE);
+            }
+        }
+        else
+        {
+            token_found = false;
+        }
+    }
+    free(buffer);
 }
 
 void tty_wait_for_device(void)
@@ -1027,22 +1206,50 @@ void forward_to_tty(char output_char)
     }
     else
     {
-        if (option.hex_mode)
+        switch (option.output_mode)
         {
-            output_hex(output_char);
-        }
-        else
-        {
-            /* Send output to tty device */
-            optional_local_echo(output_char);
-            status = tty_write(&output_char, 1);
-            if (status < 0)
-            {
-                tio_warning_printf("Could not write to tty device");
-            }
+            case OUTPUT_MODE_NORMAL:
+                if (option.input_mode == INPUT_MODE_HEX)
+                {
+                    handle_hex_prompt(output_char);
+                }
+                else
+                {
+                    /* Send output to tty device */
+                    optional_local_echo(output_char);
+                    if ((output_char == 0) && (map_o_nulbrk))
+                    {
+                        sp_start_break(hPort);
+                        delay(100);
+                        sp_end_break(hPort);
+                    }
+                    else
+                    {
+                        status = tty_write(&output_char, 1);
+                    }
+                    if (status < 0)
+                    {
+                        tio_warning_printf("Could not write to tty device");
+                    }
 
-            /* Update transmit statistics */
-            tx_total++;
+                    /* Update transmit statistics */
+                    tx_total++;
+                }
+                break;
+
+            case OUTPUT_MODE_HEX:
+                if (option.input_mode == INPUT_MODE_HEX)
+                {
+                    handle_hex_prompt(output_char);
+                }
+                else
+                {
+                    optional_local_echo(output_char);
+                }
+                break;
+
+            case OUTPUT_MODE_END:
+                break;
         }
     }
 }
@@ -1074,14 +1281,7 @@ int tty_connect(void)
     }
 
     /* Manage print output mode */
-    if (option.hex_mode)
-    {
-        print = print_hex;
-    }
-    else
-    {
-        print = print_normal;
-    }
+    tty_output_mode_set(option.output_mode);
 
     /* Save current port settings */
     if (sp_get_config(hPort, cfgPort_old) < 0)
@@ -1171,7 +1371,7 @@ int tty_connect(void)
                     input_char = input_buffer[i];
 
                     /* Print timestamp on new line if enabled */
-                    if ((next_timestamp && input_char != '\n' && input_char != '\r') && !option.hex_mode)
+                    if ((next_timestamp && input_char != '\n' && input_char != '\r') && (option.output_mode == OUTPUT_MODE_NORMAL))
                     {
                         now = timestamp_current_time();
                         if (now)
@@ -1272,7 +1472,7 @@ int tty_connect(void)
                         /* Handle commands */
                         handle_command_sequence(input_char, &output_char, &forward);
 
-                        if ((option.hex_mode) && (forward))
+                        if ((option.input_mode == INPUT_MODE_HEX) && (forward))
                         {
                             if (!is_valid_hex(input_char))
                             {

@@ -22,6 +22,7 @@ _tio()
           -e --local-echo \
           -l --log \
              --log-file \
+             --log-directory \
              --log-append \
              --log-strip \
           -m --map \
@@ -30,7 +31,8 @@ _tio()
           -L --list-devices \
           -c --color \
           -S --socket \
-          -x --hexadecimal \
+             --input-mode \
+             --output-mode \
           -r --response-wait \
              --response-timeout \
              --rs-485 \
@@ -94,6 +96,10 @@ _tio()
             COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
             return 0
             ;;
+        --log-directory)
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
         --log-append)
             COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
             return 0
@@ -126,8 +132,12 @@ _tio()
             COMPREPLY=( $(compgen -W "unix: inet: inet6:" -- ${cur}) )
             return 0
             ;;
-        -x | --hexadecimal)
-            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+        --input-mode)
+            COMPREPLY=( $(compgen -W "normal hex"  -- ${cur}) )
+            return 0
+            ;;
+        --output-mode)
+            COMPREPLY=( $(compgen -W "normal hex"  -- ${cur}) )
             return 0
             ;;
         -r | --response-wait)

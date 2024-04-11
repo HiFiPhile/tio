@@ -29,6 +29,20 @@
 #include "timestamp.h"
 #include "alert.h"
 
+typedef enum
+{
+    INPUT_MODE_NORMAL,
+    INPUT_MODE_HEX,
+    INPUT_MODE_END,
+} input_mode_t;
+/* Options */
+typedef enum
+{
+    OUTPUT_MODE_NORMAL,
+    OUTPUT_MODE_HEX,
+    OUTPUT_MODE_END,
+} output_mode_t;
+
 /* Options */
 struct option_t
 {
@@ -50,9 +64,13 @@ struct option_t
     bool local_echo;
     enum timestamp_t timestamp;
     const char *log_filename;
+    const char *log_directory;
+    const char *map;
     const char *socket;
     int color;
     bool hex_mode;
+    input_mode_t input_mode;
+    output_mode_t output_mode;
     unsigned char prefix_code;
     unsigned char prefix_key;
     bool prefix_enabled;
@@ -74,3 +92,6 @@ void options_parse_final(int argc, char *argv[]);
 
 void line_pulse_duration_option_parse(const char *arg);
 enum script_run_t script_run_option_parse(const char *arg);
+
+input_mode_t input_mode_option_parse(const char *arg);
+output_mode_t output_mode_option_parse(const char *arg);

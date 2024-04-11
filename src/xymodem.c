@@ -17,7 +17,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "serialport.h"
-#include "misc.h"
+#include "xymodem.h"
+#include "print.h"
 #include "mmap.h"
 
 #define SOH 0x01
@@ -125,7 +126,7 @@ static int xmodem_1k(struct sp_port *port, const void *data, size_t len, int seq
                 return ERR;
             ret = sp_blocking_write(port, from, sz, 0);
             if(ret < 0) {
-                perror("Write packet to serial failed");
+                tio_error_print("Write packet to serial failed");
                 return ERR;
             }
 
@@ -169,7 +170,7 @@ static int xmodem_1k(struct sp_port *port, const void *data, size_t len, int seq
     }
 
     /* Send EOT at 1 Hz until ACK or CAN received */
-    while (seq) {
+    while (1) {
         if (key_hit)
             return ERR;
         ret = sp_blocking_write(port, EOT, 1, 0);
@@ -320,7 +321,7 @@ int xymodem_send(struct sp_port *port, const char *filename, char mode)
     /* Open file, map into memory */
     fd = open(filename, O_RDONLY);
     if (fd < 0) {
-        perror("Could not open file");
+        tio_error_print("Could not open file");
         return ERR;
     }
     fstat(fd, &stat);
@@ -328,16 +329,16 @@ int xymodem_send(struct sp_port *port, const char *filename, char mode)
     buf = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (!buf) {
         close(fd);
-        perror("Could not mmap file");
+        tio_error_print("Could not mmap file");
         return ERR;
     }
 
     /* Do transfer */
     key_hit = 0;
-    if (mode == 'x') {
+    if (mode == XMODEM_1K) {
         rc = xmodem_1k(port, buf, len, 1);
     }
-    else if (mode == 'X') {
+    else if (mode == XMODEM_CRC) {
         rc = xmodem(port, buf, len);
     }
     else {

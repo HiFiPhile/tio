@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
 #include "error.h"
@@ -83,4 +84,20 @@ LPSTR GetErrorMessage(DWORD dwErrorCode)
                     sizeof(Buf) - 1,
                     NULL);
     return Buf;
+}
+
+bool fs_dir_exists(const char *path)
+{
+    struct stat st;
+
+    if (stat(path, &st) != 0)
+    {
+        return false;
+    }
+    else if (!S_ISDIR(st.st_mode))
+    {
+        return false;
+    }
+
+    return true;
 }

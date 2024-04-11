@@ -80,6 +80,19 @@ extern char ansi_format[];
     } \
 }
 
+#define tio_error_print(format, args...) \
+{ \
+    if (!option.mute) \
+    { \
+        if (print_tainted) \
+        putchar('\n'); \
+        if (option.color < 0) \
+        fprintf (stdout, "\r[%s] Error: " format "\r\n", timestamp_current_time(), ## args); \
+        else \
+        ansi_printf("[%s] Error: " format, timestamp_current_time(), ## args); \
+    } \
+}
+
 #define tio_printf(format, args...) \
 { \
     if (!option.mute) \
@@ -116,3 +129,4 @@ void print_hex(char c);
 void print_normal(char c);
 void print_init_ansi_formatting(void);
 void tio_printf_array(const char *array);
+void print_tainted_set(void);

@@ -43,6 +43,7 @@ enum opt_t
     OPT_NONE,
     OPT_TIMESTAMP_FORMAT,
     OPT_LOG_FILE,
+    OPT_LOG_DIRECTORY,
     OPT_LOG_STRIP,
     OPT_LOG_APPEND,
     OPT_LINE_PULSE_DURATION,
@@ -53,6 +54,8 @@ enum opt_t
     OPT_SCRIPT,
     OPT_SCRIPT_FILE,
     OPT_SCRIPT_RUN,
+    OPT_INPUT_MODE,
+    OPT_OUTPUT_MODE,
 };
 
 /* Default options */
@@ -73,12 +76,15 @@ struct option_t option =
     .log = false,
     .log_append = false,
     .log_filename = NULL,
+    .log_directory = NULL,
     .log_strip = false,
     .local_echo = false,
     .timestamp = TIMESTAMP_NONE,
     .socket = NULL,
+    .map = "",
     .color = 256, // Bold
-    .hex_mode = false,
+    .input_mode = INPUT_MODE_NORMAL,
+    .output_mode = OUTPUT_MODE_NORMAL,
     .prefix_code = 20, // ctrl-t
     .prefix_key = 't',
     .prefix_enabled = true,
@@ -111,13 +117,17 @@ void print_help(char *argv[])
     printf("      --line-pulse-duration <duration>   Set line pulse duration\n");
     printf("  -n, --no-autoconnect                   Disable automatic connect\n");
     printf("  -e, --local-echo                       Enable local echo\n");
+    printf("      --input-mode normal|hex            Select input mode (default: normal)\n");
+    printf("      --output-mode normal|hex           Select output mode (default: normal)\n");
     printf("  -t, --timestamp                        Enable line timestamp\n");
     printf("      --timestamp-format <format>        Set timestamp format (default: 24hour)\n");
     printf("  -L, --list-devices                     List available serial devices by ID\n");
     printf("  -l, --log                              Enable log to file\n");
     printf("      --log-file <filename>              Set log filename\n");
+    printf("      --log-directory <path>             Set log directory path for automatic named logs\n");
     printf("      --log-append                       Append to log file\n");
     printf("      --log-strip                        Strip control characters and escape sequences\n");
+    printf("  -m, --map <flags>                      Map characters\n");
     printf("  -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)\n");
     printf("  -S, --socket <socket>                  Redirect I/O to socket\n");
     printf("  -x, --hexadecimal                      Enable hexadecimal mode\n");
@@ -184,6 +194,70 @@ void line_pulse_duration_option_parse(const char *arg)
     free(buffer);
 }
 
+input_mode_t input_mode_option_parse(const char *arg)
+{
+    if (strcmp("normal", arg) == 0)
+    {
+        return INPUT_MODE_NORMAL;
+    }
+    else if (strcmp("hex", arg) == 0)
+    {
+        return INPUT_MODE_HEX;
+    }
+    else
+    {
+        tio_error_printf("Invalid input mode option");
+        exit(EXIT_FAILURE);
+    }
+}
+
+output_mode_t output_mode_option_parse(const char *arg)
+{
+    if (strcmp("normal", arg) == 0)
+    {
+        return OUTPUT_MODE_NORMAL;
+    }
+    else if (strcmp("hex", arg) == 0)
+    {
+        return OUTPUT_MODE_HEX;
+    }
+    else
+    {
+        tio_error_printf("Invalid output mode option");
+        exit(EXIT_FAILURE);
+    }
+}
+
+const char *input_mode_by_string(input_mode_t mode)
+{
+    switch (mode)
+    {
+        case INPUT_MODE_NORMAL:
+            return "normal";
+        case INPUT_MODE_HEX:
+            return "hex";
+        case INPUT_MODE_END:
+            break;
+    }
+
+    return NULL;
+}
+
+const char *output_mode_by_string(output_mode_t mode)
+{
+    switch (mode)
+    {
+        case OUTPUT_MODE_NORMAL:
+            return "normal";
+        case OUTPUT_MODE_HEX:
+            return "hex";
+        case OUTPUT_MODE_END:
+            break;
+    }
+
+    return NULL;
+}
+
 enum script_run_t script_run_option_parse(const char *arg)
 {
     if (strcmp("once", arg) == 0)
@@ -219,9 +293,13 @@ void options_print()
     tio_printf(" Output line delay: %d", option.output_line_delay);
     tio_printf(" Auto connect: %s", option.no_autoconnect ? "disabled" : "enabled");
     tio_printf(" Pulse duration: DTR=%d RTS=%d DEF=%d ", option.dtr_pulse_duration,
-                                                                            option.rts_pulse_duration,
-                                                                            option.pulse_duration);
+                                                         option.rts_pulse_duration,
+                                                         option.pulse_duration);
     tio_printf(" Hexadecimal mode: %s", option.hex_mode ? "enabled" : "disabled");
+    tio_printf(" Input mode: %s", input_mode_by_string(option.input_mode));
+    tio_printf(" Output mode: %s", output_mode_by_string(option.output_mode));
+    if (option.map[0] != 0)
+        tio_printf(" Map flags: %s", option.map);
     if (option.log)
         tio_printf(" Log file: %s", log_get_filename());
     if (option.socket)
@@ -262,12 +340,14 @@ void options_parse(int argc, char *argv[])
             {"list-devices",         no_argument,       0, 'L'                     },
             {"log",                  no_argument,       0, 'l'                     },
             {"log-file",             required_argument, 0, OPT_LOG_FILE            },
+            {"log-directory",        required_argument, 0, OPT_LOG_DIRECTORY       },
             {"log-append",           no_argument,       0, OPT_LOG_APPEND          },
             {"log-strip",            no_argument,       0, OPT_LOG_STRIP           },
             {"socket",               required_argument, 0, 'S'                     },
             {"map",                  required_argument, 0, 'm'                     },
             {"color",                required_argument, 0, 'c'                     },
-            {"hexadecimal",          no_argument,       0, 'x'                     },
+            {"input-mode",           required_argument, 0, OPT_INPUT_MODE          },
+            {"output-mode",          required_argument, 0, OPT_OUTPUT_MODE         },
             {"response-wait",        no_argument,       0, 'r'                     },
             {"response-timeout",     required_argument, 0, OPT_RESPONSE_TIMEOUT    },
             {"alert",                required_argument, 0, OPT_ALERT               },
@@ -364,6 +444,10 @@ void options_parse(int argc, char *argv[])
                 option.log_filename = optarg;
                 break;
 
+            case OPT_LOG_DIRECTORY:
+                option.log_directory = optarg;
+                break;
+
             case OPT_LOG_STRIP:
                 option.log_strip = true;
                 break;
@@ -374,6 +458,10 @@ void options_parse(int argc, char *argv[])
 
             case 'S':
                 option.socket = optarg;
+                break;
+
+			case 'm':
+                option.map = optarg;
                 break;
 
             case 'c':
@@ -408,6 +496,13 @@ void options_parse(int argc, char *argv[])
 
             case 'x':
                 option.hex_mode = true;
+
+            case OPT_INPUT_MODE:
+                option.input_mode = input_mode_option_parse(optarg);
+                break;
+
+            case OPT_OUTPUT_MODE:
+                option.output_mode = output_mode_option_parse(optarg);
                 break;
 
             case 'r':

@@ -102,11 +102,9 @@ static void script_line_toggle(int line)
     switch (line)
     {
         case TIOCM_DTR:
-            tty_line_toggle(line);
-            break;
         case TIOCM_RTS:
-            tty_line_toggle(line);
-            break;
+            line_mask |= line;
+            line_state ^= line;
         default:
             break;
     }
@@ -157,6 +155,20 @@ static int toggle(lua_State *L)
     return 0;
 }
 
+// lua: config_apply(line)
+static int config_apply(lua_State *L)
+{
+    UNUSED(L);
+
+    if(line_mask != 0)
+    {
+        tty_line_set(line_mask, line_state);
+        line_mask = 0;
+    }
+
+    return 0;
+}
+
 static void script_buffer_run(lua_State *L, const char *script_buffer)
 {
     int error;
@@ -177,6 +189,9 @@ static const struct luaL_Reg tio_lib[] =
     { "high", high},
     { "low", low},
     { "toggle", toggle},
+    { "config_high", high},
+    { "config_low", low},
+    { "config_apply", config_apply},
     {NULL, NULL}
 };
 
