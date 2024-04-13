@@ -18,12 +18,13 @@ COMPILER_INCLUDES ?=
 INCLUDES= -I./ \
 	$(COMPILER_INCLUDES) \
 	-Ilibinih \
+	-Ire \
 	-Iposix_compat \
     -I../src \
 
 DEFINES = \
 	$(COMPILER_DEFINES) \
-	-DVERSION=\"Win32\ Port\" \
+	-DVERSION="Win32-Port" \
 
 APPLICATION_FILES= \
     ../src/error.c \
@@ -40,6 +41,7 @@ APPLICATION_FILES= \
     ../src/xymodem.c \
     ../src/script.c \
     libinih/ini.c \
+    re/re.c \
 	posix_compat/serialport.c \
 	posix_compat/semaphore.c \
 	posix_compat/ring.c \

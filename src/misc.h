@@ -1,5 +1,5 @@
 /*
- * tio - a simple serial terminal I/O tool
+ * tio - a serial device I/O tool
  *
  * Copyright (c) 2014-2022  Martin Lund
  *
@@ -25,6 +25,7 @@
 #include <Windows.h>
 
 #include <stdbool.h>
+#include <stdio.h>
 
 #define UNUSED(expr) do { (void)(expr); } while (0)
 

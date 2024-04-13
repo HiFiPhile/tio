@@ -1,5 +1,5 @@
 /*
- * tio - a simple serial terminal I/O tool
+ * tio - a serial device I/O tool
  *
  * Copyright (c) 2014-2024  Martin Lund
  *
@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "serialport.h"
+
 enum script_run_t
 {
     SCRIPT_RUN_ONCE,
@@ -29,4 +31,4 @@ enum script_run_t
     SCRIPT_RUN_END,
 };
 
-void script_run(void);
+void script_run(struct sp_port *hPort);

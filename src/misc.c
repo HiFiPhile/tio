@@ -1,5 +1,5 @@
 /*
- * tio - a simple serial terminal I/O tool
+ * tio - a serial device I/O tool
  *
  * Copyright (c) 2014-2022  Martin Lund
  *
@@ -19,6 +19,7 @@
  * 02110-1301, USA.
  */
 
+#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>

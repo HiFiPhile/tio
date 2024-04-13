@@ -1,5 +1,5 @@
 /*
- * tio - a simple serial terminal I/O tool
+ * tio - a serial device I/O tool
  *
  * Copyright (c) 2014-2022  Martin Lund
  *
@@ -635,7 +635,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 tio_printf(" ctrl-%c x       Send file via Xmodem", option.prefix_key);
                 tio_printf(" ctrl-%c X       Send file via Xmodem-CRC", option.prefix_key);
                 tio_printf(" ctrl-%c y       Send file via Ymodem", option.prefix_key);
-                tio_printf(" ctrl-%c ctrl-%c Send ctrl-%c character", option.prefix_key, option.prefix_key, option.prefix_key);
+                tio_printf(" ctrl-%c ctrl-%c  Send ctrl-%c character", option.prefix_key, option.prefix_key, option.prefix_key);
                 break;
 
             case KEY_SHIFT_L:
@@ -786,7 +786,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 
             case KEY_R:
                 /* Run script */
-                script_run();
+                script_run(hPort);
                 break;
 
             case KEY_S:
@@ -1312,7 +1312,7 @@ int tty_connect(void)
     /* Manage script activation */
     if (option.script_run != SCRIPT_RUN_NEVER)
     {
-        script_run();
+        script_run(hPort);
 
         if (option.script_run == SCRIPT_RUN_ONCE)
         {
