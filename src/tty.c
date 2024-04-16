@@ -1589,6 +1589,7 @@ int tty_connect(void)
                                         default:
                                             if (line_index < BUFSIZ)
                                             {
+                                                optional_local_echo(input_char);
                                                 line_buffer[line_index++] = input_char;
                                             }
                                             else
