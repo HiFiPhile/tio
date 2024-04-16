@@ -233,14 +233,6 @@ static int data_handler(void *user, const char *section, const char *name,
                 option.prefix_key = value[0];
             }
         }
-        else if (!strcmp(name, "response-wait"))
-        {
-            option.response_wait = read_boolean(value, name);
-        }
-        else if (!strcmp(name, "response-timeout"))
-        {
-            option.response_timeout = read_integer(value, name, 0, LONG_MAX);
-        }
         else if (!strcmp(name, "alert"))
         {
             option.alert = alert_option_parse(value);
@@ -345,37 +337,45 @@ static int resolve_config_file(void)
     char *home = getenv("USERPROFILE");
     if (home)
     {
-        asprintf(&c.path, "%s/.config/tio/config", home);
-        if (access(c.path, F_OK) == 0)
+        if (asprintf(&c.path, "%s/tio/config", home) != -1)
         {
-            return 0;
+            if (access(c.path, F_OK) == 0)
+            {
+                return 0;
+            }
+            free(c.path);
         }
-        free(c.path);
 
-        asprintf(&c.path, "%s/.tioconfig", home);
-        if (access(c.path, F_OK) == 0)
+        if (asprintf(&c.path, "%s/.tioconfig", home) != 0)
         {
-            return 0;
+            if (access(c.path, F_OK) == 0)
+            {
+                return 0;
+            }
+            free(c.path);
         }
-        free(c.path);
     }
 
     home = getenv("HOME");
     if (home)
     {
-        asprintf(&c.path, "%s/.config/tio/config", home);
-        if (access(c.path, F_OK) == 0)
+        if (asprintf(&c.path, "%s/.config/tio/config", home) != -1)
         {
-            return 0;
+            if (access(c.path, F_OK) == 0)
+            {
+                return 0;
+            }
+            free(c.path);
         }
-        free(c.path);
 
-        asprintf(&c.path, "%s/.tioconfig", home);
-        if (access(c.path, F_OK) == 0)
+        if (asprintf(&c.path, "%s/.tioconfig", home) != -1)
         {
-            return 0;
+            if (access(c.path, F_OK) == 0)
+            {
+                return 0;
+            }
+            free(c.path);
         }
-        free(c.path);
     }
 
     c.path = NULL;

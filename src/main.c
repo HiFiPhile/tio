@@ -50,15 +50,6 @@ int main(int argc, char *argv[])
         return status;
     }
 
-    /* Parse configuration file */
-    config_file_parse();
-
-    /* Parse command-line options (2nd pass) */
-    options_parse_final(argc, argv);
-
-    /* Configure tty device */
-    tty_configure();
-
     /* Configure input terminal */
     if (isatty(fileno(stdin)))
     {
@@ -68,12 +59,6 @@ int main(int argc, char *argv[])
     {
         // Enter non interactive mode
         interactive_mode = false;
-
-        // Mute tio text in response mode
-        if (option.response_wait)
-        {
-            option.mute = true;
-        }
     }
 
     /* Configure output terminal */
@@ -86,6 +71,15 @@ int main(int argc, char *argv[])
         // No color when piping
         option.color = -1;
     }
+
+    /* Parse configuration file */
+    config_file_parse();
+
+    /* Parse command-line options (2nd pass) */
+    options_parse_final(argc, argv);
+
+    /* Configure tty device */
+    tty_configure();
 
     /* Add log exit handler */
     atexit(&log_exit);

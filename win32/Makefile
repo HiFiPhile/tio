@@ -24,7 +24,7 @@ INCLUDES= -I./ \
 
 DEFINES = \
 	$(COMPILER_DEFINES) \
-	-DVERSION="Win32-Port" \
+	-DVERSION=\"Win32-Port\" \
 
 APPLICATION_FILES= \
     ../src/error.c \

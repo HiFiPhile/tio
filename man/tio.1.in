@@ -191,11 +191,18 @@ If defining more than one flag, the flags must be comma separated.
 .RE
 
 .TP
-.BR "    \-\-input\-mode " normal|hex
+.BR "    \-\-input\-mode " normal|hex|line
 
-Set input mode. In hex input mode bytes can be sent by typing the
-\fBtwo-character hexadecimal\fR representation of the 1 byte value, e.g.: to
-send \fI0xA\fR you must type \fI0a\fR or \fI0A\fR.
+Set input mode.
+
+In normal mode input characters are sent immediately as they are typed.
+
+In hex input mode bytes can be sent by typing the \fBtwo-character
+hexadecimal\fR representation of the 1 byte value, e.g.: to send \fI0xA\fR you
+must type \fI0a\fR or \fI0A\fR.
+
+In line input mode input characters are sent when you press enter. The only
+editing feature supported in this mode is backspace.
 
 Default value is "normal".
 
@@ -244,21 +251,6 @@ If port is 0 or no port is provided default port 3333 is used.
 .P
 At present there is a hardcoded limit of 16 clients connected at one time.
 .RE
-
-.TP
-.BR \-r ", " \-\-response\-wait
-
-Wait for line response then quit. A line is considered any string terminated
-with a NL character. If no line is received tio will quit after response
-timeout.
-
-Any tio text is automatically muted when piping a string to tio while in
-response mode to make it easy to parse the response.
-
-.TP
-.BR "    \-\-response\-timeout " \fI<ms>
-
-Set timeout [ms] of line response (default: 100).
 
 .TP
 .BR "    \-\-rs\-485"
@@ -494,10 +486,6 @@ Set output mode.
 Set socket to redirect I/O to
 .IP "\fBprefix-ctrl-key"
 Set prefix ctrl key (a..z or 'none', default: t)
-.IP "\fBresponse-wait"
-Enable wait for line response
-.IP "\fBresponse-timeout"
-Set line response timeout
 .IP "\fBrs-485"
 Enable RS-485 mode
 .IP "\fBrs-485-config"
@@ -648,11 +636,10 @@ Pipe command to the serial device:
 $ echo "ls -la" | tio /dev/serial/by\-id/usb\-FTDI_TTL232R-3V3_FTGQVXBL\-if00\-port0
 
 .TP
-Pipe command to the serial device and wait for line response (string ending with CR or NL):
+Pipe command to serial device and wait for line response within 1 second:
 
-$ echo "*IDN?" | tio /dev/ttyACM0 --response-wait
+$ echo "*IDN?" | tio /dev/ttyACM0 --script "expect('\\r\\n', 1000)" --mute
 .TP
-In this mode, only the response will be printed.
 
 .TP
 Likewise, to pipe data from file to the serial device:
@@ -680,4 +667,4 @@ Visit https://tio.github.io
 
 .SH "AUTHOR"
 .PP
-Created by Martin Lund <martin.lund@keep\-it\-simple.com>.
+Maintained by Martin Lund <martin.lund@keep\-it\-simple.com>.

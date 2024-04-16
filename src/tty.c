@@ -168,8 +168,6 @@ static void optional_local_echo(char c)
     {
         log_putc(c);
     }
-
-    print_tainted_set();
 }
 
 inline static bool is_valid_hex(char c)
@@ -736,6 +734,11 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                         tio_printf("Switched to hex input mode");
                         break;
 
+                    case INPUT_MODE_LINE:
+                        option.input_mode = INPUT_MODE_LINE;
+                        tio_printf("Switched to line input mode");
+                        break;
+
                     case INPUT_MODE_END:
                         option.input_mode = INPUT_MODE_NORMAL;
                         tio_printf("Switched to normal input mode");
@@ -845,7 +848,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 if (tio_readln()) {
                     tio_printf("Sending file '%s'  ", line);
                     tio_printf("Press any key to abort transfer");
-                    tio_printf("%s", xymodem_send(hPort, line, input_char) < 0 ? "Aborted" : "Done");
+                    tio_printf("%s", xymodem_send(hPort, line, YMODEM) < 0 ? "Aborted" : "Done");
                 }
                 break;
 
@@ -1259,12 +1262,15 @@ void forward_to_tty(char output_char)
 int tty_connect(void)
 {
     char   input_char, output_char;
-    char   input_buffer[BUFSIZ];
+    char   input_buffer[BUFSIZ] = {};
+    char   line_buffer[BUFSIZ] = {};
     static bool first = true;
     int    status;
     bool   next_timestamp = false;
     char*  now = NULL;
+    unsigned int line_index = 0;
     bool ignore_stdin = false;
+    static char previous_char[2] = {};
 
     /* Flush stale I/O data (if any) */
     sp_drain(hPort);
@@ -1311,6 +1317,35 @@ int tty_connect(void)
     sp_new_event_set(&sp_event);
     sp_add_port_events(sp_event, hPort, SP_EVENT_RX_READY);
 
+    /* If stdin is a pipe forward all input to tty device */
+    if (interactive_mode == false)
+    {
+        while (true)
+        {
+            int ret = RING_Read_Blocking(ring, &input_char, 1);
+            if (ret < 0)
+            {
+                tio_error_printf("Could not read from pipe (%s)", strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+            else if (ret > 0)
+            {
+                // Forward to tty device
+                ret = sp_blocking_write(hPort, &input_char, 1, 0);
+                if (ret < 0)
+                {
+                    tio_error_printf("Could not write to serial device (%s)", strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
+            }
+            else
+            {
+                // EOF - finished forwarding
+                break;
+            }
+        }
+    }
+
     /* Manage script activation */
     if (option.script_run != SCRIPT_RUN_NEVER)
     {
@@ -1320,6 +1355,12 @@ int tty_connect(void)
         {
             option.script_run = SCRIPT_RUN_NEVER;
         }
+    }
+
+    // Exit if piped input
+    if (interactive_mode == false)
+    {
+        exit(EXIT_SUCCESS);
     }
 
     /* Input loop */
@@ -1343,8 +1384,7 @@ int tty_connect(void)
         pollfd[1].events = POLL_IN;
 
         /* Block until input becomes available */
-        status = poll(pollfd, ignore_stdin ? 2 : 3,
-            (option.response_wait) && (option.response_timeout != 0) ? option.response_timeout : -1);
+        status = poll(pollfd, ignore_stdin ? 2 : 3, -1);
         if (status > 0)
         {
             bool forward = false;
@@ -1433,15 +1473,6 @@ int tty_connect(void)
                     {
                         next_timestamp = true;
                     }
-
-                    if (option.response_wait)
-                    {
-                        if (input_char == '\n')
-                        {
-                             tty_sync(hPort);
-                             exit(EXIT_SUCCESS);
-                        }
-                    }
                 }
             }
             else if (pollfd[2].revents == POLL_IN)
@@ -1474,12 +1505,107 @@ int tty_connect(void)
                         /* Handle commands */
                         handle_command_sequence(input_char, &output_char, &forward);
 
-                        if ((option.input_mode == INPUT_MODE_HEX) && (forward))
+                        if (forward)
                         {
-                            if (!is_valid_hex(input_char))
+                            switch (option.input_mode)
                             {
-                                tio_warning_printf("Invalid hex character: '%d' (0x%02x)", input_char, input_char);
-                                forward = false;
+                                case INPUT_MODE_HEX:
+                                    if (!is_valid_hex(input_char))
+                                    {
+                                        tio_warning_printf("Invalid hex character: '%d' (0x%02x)", input_char, input_char);
+                                        forward = false;
+                                    }
+                                    break;
+
+                                case INPUT_MODE_LINE:
+                                    switch (input_char)
+                                    {
+                                        case 27: // Escape
+                                            forward = false;
+                                            break;
+
+                                        case '[':
+                                            if (previous_char[0] == 27)
+                                            {
+                                                forward = false;
+                                            }
+                                            break;
+
+                                        case 'A':
+                                        case 'B':
+                                        case 'C':
+                                        case 'D':
+                                            if ((previous_char[1] == 27) && (previous_char[0] == '['))
+                                            {
+                                                // Handle arrow keys
+                                                switch (input_char)
+                                                {
+                                                    case 'A': // Up arrow
+                                                        // Ignore
+                                                        break;
+                                                    case 'B': // Down arrow
+                                                        // Ignore
+                                                        break;
+                                                    case 'C': // Right arrow
+                                                        // Ignore
+                                                        break;
+                                                    case 'D': // Left arrow
+                                                        // Ignore
+                                                        break;
+                                                }
+                                                forward = false;
+                                            }
+                                            break;
+
+                                        case '\b':
+                                        case 127: // Backspace
+                                            if (line_index)
+                                            {
+                                                if ((option.output_mode == OUTPUT_MODE_HEX) && (option.local_echo))
+                                                {
+                                                    printf("\b\b\b   \b\b\b"); // Destructive backspace
+                                                }
+                                                else
+                                                {
+                                                    printf("\b \b"); // Destructive backspace
+                                                }
+                                                line_index--;
+                                            }
+                                            forward = false;
+                                            break;
+
+                                        case 13: // Carriage return
+                                            // Write buffered line to tty device
+                                            tty_write(line_buffer, line_index);
+                                            tty_write("\r", 1);
+                                            optional_local_echo('\r');
+                                            tty_sync();
+                                            putchar('\r');
+                                            putchar('\n');
+                                            line_index = 0;
+                                            forward = false;
+                                            break;
+
+                                        default:
+                                            if (line_index < BUFSIZ)
+                                            {
+                                                line_buffer[line_index++] = input_char;
+                                            }
+                                            else
+                                            {
+                                                tio_error_print("Input exceeds maximum line length. Truncating.");
+                                            }
+                                            forward = false;
+                                    }
+
+                                    // Save 2 latest stdin input characters
+                                    previous_char[1] = previous_char[0];
+                                    previous_char[0] = input_char;
+
+                                    break;
+
+                                default:
+                                    break;
                             }
                         }
                     }

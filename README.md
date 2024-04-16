@@ -56,7 +56,6 @@ when used in combination with [tmux](https://tmux.github.io).
  * Activate sub-configurations by name or pattern
  * Redirect I/O to UNIX socket or IPv4/v6 network socket for scripting or TTY sharing
  * Pipe input and/or output
- * Support for simple line request/response handling
  * Bash completion on options, serial device names, and sub-configuration names
  * Configurable text color
  * Visual or audible alert on connect/disconnect
@@ -95,7 +94,7 @@ Options:
       --line-pulse-duration <duration>   Set line pulse duration
   -n, --no-autoconnect                   Disable automatic connect
   -e, --local-echo                       Enable local echo
-      --input-mode normal|hex            Select input mode (default: normal)
+      --input-mode normal|hex|line       Select input mode (default: normal)
       --output-mode normal|hex           Select output mode (default: normal)
   -t, --timestamp                        Enable line timestamp
       --timestamp-format <format>        Set timestamp format (default: 24hour)
@@ -108,8 +107,6 @@ Options:
   -m, --map <flags>                      Map characters
   -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)
   -S, --socket <socket>                  Redirect I/O to socket
-  -r, --response-wait                    Wait for line response then quit
-      --response-timeout <ms>            Response timeout (default: 100)
       --rs-485                           Enable RS-485 mode
       --rs-485-config <config>           Set RS-485 configuration
       --alert bell|blink|none            Alert on connect/disconnect (default: none)
@@ -143,7 +140,7 @@ $ tio /dev/ttyUSB0
 
 Which corresponds to the commonly used default options:
 ```
-$ tio -b 115200 -d 8 -f none -s 1 -p none /dev/ttyUSB0
+$ tio --baudrate 115200 --databits 8 --flow none --stopbits 1 --parity none /dev/ttyUSB0
 ```
 
 It is recommended to connect serial TTY devices by ID:
@@ -175,14 +172,14 @@ Redirect I/O to IPv4 network socket on port 4242:
 $ tio --socket inet:4242 /dev/ttyUSB0
 ```
 
-Inject data to the serial device:
+Pipe data to the serial device:
 ```
 $ cat data.bin | tio /dev/ttyUSB0
 ```
 
-Send command to serial device and wait for line response:
+Pipe command to serial device and wait for line response within 1 second:
 ```
-$ echo "*IDN?" | tio /dev/ttyACM0 --response-wait
+$ echo "*IDN?" | tio /dev/ttyACM0 --script "expect('\r\n', 1000)" --mute
 KORAD KD3305P V4.2 SN:32475045
 ```
 
@@ -397,10 +394,8 @@ $ sudo usermod -a -G dialout <username>
 
 ## 5. Contributing
 
-tio is open source. If you want to help out with the project please feel free
-to join in.
-
-All contributions (bug reports, code, doc, ideas, etc.) are welcome.
+This is an open source project - all contributions (bug reports, code, doc,
+ideas, etc.) are welcome.
 
 Please use the github issue tracker and pull request features.
 
@@ -427,6 +422,6 @@ tio is GPLv2+. See LICENSE file for more details.
 
 ## 9. Authors
 
-Created by Martin Lund \<martin.lund@keep-it-simple.com>
+Maintained by Martin Lund \<martin.lund@keep-it-simple.com>
 
 See the AUTHORS file for full list of contributors.

@@ -47,7 +47,6 @@ enum opt_t
     OPT_LOG_STRIP,
     OPT_LOG_APPEND,
     OPT_LINE_PULSE_DURATION,
-    OPT_RESPONSE_TIMEOUT,
     OPT_ALERT,
     OPT_COMPLETE_SUB_CONFIGS,
     OPT_MUTE,
@@ -88,8 +87,6 @@ struct option_t option =
     .prefix_code = 20, // ctrl-t
     .prefix_key = 't',
     .prefix_enabled = true,
-    .response_wait = false,
-    .response_timeout = 100,
     .mute = false,
     .alert = ALERT_NONE,
     .complete_sub_configs = false,
@@ -117,7 +114,7 @@ void print_help(char *argv[])
     printf("      --line-pulse-duration <duration>   Set line pulse duration\n");
     printf("  -n, --no-autoconnect                   Disable automatic connect\n");
     printf("  -e, --local-echo                       Enable local echo\n");
-    printf("      --input-mode normal|hex            Select input mode (default: normal)\n");
+    printf("      --input-mode normal|hex|line       Select input mode (default: normal)\n");
     printf("      --output-mode normal|hex           Select output mode (default: normal)\n");
     printf("  -t, --timestamp                        Enable line timestamp\n");
     printf("      --timestamp-format <format>        Set timestamp format (default: 24hour)\n");
@@ -130,9 +127,6 @@ void print_help(char *argv[])
     printf("  -m, --map <flags>                      Map characters\n");
     printf("  -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)\n");
     printf("  -S, --socket <socket>                  Redirect I/O to socket\n");
-    printf("  -x, --hexadecimal                      Enable hexadecimal mode\n");
-    printf("  -r, --response-wait                    Wait for line response then quit\n");
-    printf("      --response-timeout <ms>            Response timeout (default: 100)\n");
     printf("      --alert bell|blink|none            Alert on connect/disconnect (default: none)\n");
     printf("      --mute                             Mute tio\n");
     printf("      --script <string>                  Run script from string\n");
@@ -168,22 +162,24 @@ void line_pulse_duration_option_parse(const char *arg)
             char keyname[11];
             unsigned int value;
 
-            if (sscanf(token, "%10[^=]=%d", keyname, &value) != 2)
+            if (sscanf(token, "%10[^=]=%d", keyname, &value) == 2)
+            {
+                if (!strcmp(keyname, "DTR"))
+                {
+                    option.dtr_pulse_duration = value;
+                }
+                else if (!strcmp(keyname, "RTS"))
+                {
+                    option.rts_pulse_duration = value;
+                }
+                else if (!strcmp(keyname, "DEF"))
+                {
+                    option.pulse_duration = value;
+                }
+            }
+            else
             {
                 token_found = false;
-            }
-
-            if (!strcmp(keyname, "DTR"))
-            {
-                option.dtr_pulse_duration = value;
-            }
-            else if (!strcmp(keyname, "RTS"))
-            {
-                option.rts_pulse_duration = value;
-            }
-            else if (!strcmp(keyname, "DEF"))
-            {
-                option.pulse_duration = value;
             }
         }
         else
@@ -203,6 +199,10 @@ input_mode_t input_mode_option_parse(const char *arg)
     else if (strcmp("hex", arg) == 0)
     {
         return INPUT_MODE_HEX;
+    }
+    else if (strcmp("line", arg) == 0)
+    {
+        return INPUT_MODE_LINE;
     }
     else
     {
@@ -236,6 +236,8 @@ const char *input_mode_by_string(input_mode_t mode)
             return "normal";
         case INPUT_MODE_HEX:
             return "hex";
+        case INPUT_MODE_LINE:
+            return "line";
         case INPUT_MODE_END:
             break;
     }
@@ -295,7 +297,6 @@ void options_print()
     tio_printf(" Pulse duration: DTR=%d RTS=%d DEF=%d ", option.dtr_pulse_duration,
                                                          option.rts_pulse_duration,
                                                          option.pulse_duration);
-    tio_printf(" Hexadecimal mode: %s", option.hex_mode ? "enabled" : "disabled");
     tio_printf(" Input mode: %s", input_mode_by_string(option.input_mode));
     tio_printf(" Output mode: %s", output_mode_by_string(option.output_mode));
     if (option.map[0] != 0)
@@ -348,8 +349,6 @@ void options_parse(int argc, char *argv[])
             {"color",                required_argument, 0, 'c'                     },
             {"input-mode",           required_argument, 0, OPT_INPUT_MODE          },
             {"output-mode",          required_argument, 0, OPT_OUTPUT_MODE         },
-            {"response-wait",        no_argument,       0, 'r'                     },
-            {"response-timeout",     required_argument, 0, OPT_RESPONSE_TIMEOUT    },
             {"alert",                required_argument, 0, OPT_ALERT               },
             {"mute",                 no_argument,       0, OPT_MUTE                },
             {"script",               required_argument, 0, OPT_SCRIPT              },
@@ -494,23 +493,12 @@ void options_parse(int argc, char *argv[])
                 }
                 break;
 
-            case 'x':
-                option.hex_mode = true;
-
             case OPT_INPUT_MODE:
                 option.input_mode = input_mode_option_parse(optarg);
                 break;
 
             case OPT_OUTPUT_MODE:
                 option.output_mode = output_mode_option_parse(optarg);
-                break;
-
-            case 'r':
-                option.response_wait = true;
-                break;
-
-            case OPT_RESPONSE_TIMEOUT:
-                option.response_timeout = string_to_long(optarg);
                 break;
 
             case OPT_ALERT:

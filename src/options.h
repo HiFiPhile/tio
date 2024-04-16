@@ -33,6 +33,7 @@ typedef enum
 {
     INPUT_MODE_NORMAL,
     INPUT_MODE_HEX,
+    INPUT_MODE_LINE,
     INPUT_MODE_END,
 } input_mode_t;
 /* Options */
@@ -68,14 +69,11 @@ struct option_t
     const char *map;
     const char *socket;
     int color;
-    bool hex_mode;
     input_mode_t input_mode;
     output_mode_t output_mode;
     unsigned char prefix_code;
     unsigned char prefix_key;
     bool prefix_enabled;
-    bool response_wait;
-    int response_timeout;
     bool mute;
     enum alert_t alert;
     bool complete_sub_configs;

@@ -76,7 +76,7 @@ extern char ansi_format[];
         if (option.color < 0) \
         fprintf (stdout, "\r[%s] Warning: " format "\r\n", timestamp_current_time(), ## args); \
         else \
-        ansi_printf("[%s] Warning: " format, timestamp_current_time(), ## args); \
+        ansi_printf("\e[1;31m[%s] Warning: " format, timestamp_current_time(), ## args); \
     } \
 }
 
@@ -89,7 +89,7 @@ extern char ansi_format[];
         if (option.color < 0) \
         fprintf (stdout, "\r[%s] Error: " format "\r\n", timestamp_current_time(), ## args); \
         else \
-        ansi_printf("[%s] Error: " format, timestamp_current_time(), ## args); \
+        ansi_printf("\e[1;31m[%s] Error: " format, timestamp_current_time(), ## args); \
     } \
 }
 
