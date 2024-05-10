@@ -1578,7 +1578,7 @@ int tty_connect(void)
                                             // Write buffered line to tty device
                                             tty_write(line_buffer, line_index);
                                             tty_write("\r", 1);
-                                            optional_local_echo('\r');
+                                            print('\r');
                                             tty_sync();
                                             putchar('\r');
                                             putchar('\n');
@@ -1589,7 +1589,7 @@ int tty_connect(void)
                                         default:
                                             if (line_index < BUFSIZ)
                                             {
-                                                optional_local_echo(input_char);
+                                                print(input_char);
                                                 line_buffer[line_index++] = input_char;
                                             }
                                             else
